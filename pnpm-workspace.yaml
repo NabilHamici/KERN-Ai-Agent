@@ -1,0 +1,5 @@
+allowBuilds:
+  electron: true
+  node-pty: true
+supportedArchitectures:
+  - darwin-arm64

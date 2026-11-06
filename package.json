@@ -1,0 +1,40 @@
+{
+  "name": "kern",
+  "version": "0.1.0",
+  "private": true,
+  "description": "KERN desktop coding agent",
+  "main": "./out/main/index.js",
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "electron-vite dev --watch",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "postinstall": "electron-rebuild -f -w node-pty",
+    "test": "node --experimental-strip-types --test --test-reporter spec test/**/*.test.ts",
+    "test:runtime": "electron test/runtime.electron.cjs",
+    "test:acceptance": "node test/acceptance.mjs"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "monaco-editor": "0.57.0",
+    "node-pty": "1.1.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "4.2.1",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.2.1",
+    "electron": "45.2.3",
+    "electron-vite": "6.0.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.6"
+  }
+}
