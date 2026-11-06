@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { agentCancelSchema, agentEventSchema, agentSubmitSchema } from './agent.ts'
 
 const invalid = { error: 'Invalid request' } as const
 
@@ -92,7 +93,13 @@ export const IpcChannel = {
   historyMissions: 'history:missions',
   historyFileChanges: 'history:fileChanges',
   terminalData: 'terminal:data',
-  terminalExit: 'terminal:exit'
+  terminalExit: 'terminal:exit',
+  agentSubmit: 'agent:submit',
+  agentCancel: 'agent:cancel',
+  agentCurrent: 'agent:current',
+  agentHistory: 'agent:history',
+  agentTranscript: 'agent:transcript',
+  agentEvent: 'agent:event'
 } as const
 
 export const requestSchemas = {
@@ -113,8 +120,15 @@ export const requestSchemas = {
   [IpcChannel.terminalResize]: terminalResizeSchema,
   [IpcChannel.terminalCancel]: emptyRequestSchema,
   [IpcChannel.historyMissions]: historyQuerySchema,
-  [IpcChannel.historyFileChanges]: historyQuerySchema
+  [IpcChannel.historyFileChanges]: historyQuerySchema,
+  [IpcChannel.agentSubmit]: agentSubmitSchema,
+  [IpcChannel.agentCancel]: agentCancelSchema,
+  [IpcChannel.agentCurrent]: emptyRequestSchema,
+  [IpcChannel.agentHistory]: historyQuerySchema,
+  [IpcChannel.agentTranscript]: agentCancelSchema
 } as const
+
+export { agentEventSchema }
 
 export type RequestChannel = keyof typeof requestSchemas
 

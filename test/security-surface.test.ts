@@ -23,7 +23,11 @@ test('renderer and preload do not import privileged modules', () => {
     "from 'fs'",
     'from "fs"',
     'safeStorage',
-    'shell.openPath'
+    'shell.openPath',
+    'Authorization: Bearer',
+    'bc_live_',
+    'bharatcode.ai',
+    'node:sqlite'
   ]
   const files = [
     ...sourceFiles(path.join('src', 'renderer')),
@@ -35,5 +39,17 @@ test('renderer and preload do not import privileged modules', () => {
     for (const token of forbidden) {
       assert.equal(source.includes(token), false, `${file} contains ${token}`)
     }
+  }
+})
+
+test('agent source does not log or embed an API key', () => {
+  const files = sourceFiles(path.join('src', 'main', 'agent'))
+  assert.ok(files.length > 0)
+  for (const file of files) {
+    const source = fs.readFileSync(file, 'utf8')
+    assert.equal(source.includes('console.'), false, file)
+    assert.equal(source.includes('bc_live_'), false, file)
+    assert.equal(source.includes('child_process'), false, file)
+    assert.equal(source.includes('node-pty'), false, file)
   }
 })

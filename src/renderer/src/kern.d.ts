@@ -1,5 +1,7 @@
 import type { editor } from 'monaco-editor'
 
+import type { AgentEvent, AgentMissionSummary, AgentTranscript } from '../../shared/agent'
+
 type KernResult<T> = { ok: true; data: T } | { ok: false; error: string }
 
 type KernBridge = {
@@ -36,6 +38,15 @@ type KernBridge = {
     fileChanges: (payload: unknown) => Promise<
       KernResult<Array<{ relativePath: string; changeType: string; createdAt: string; hasReverse: boolean }>>
     >
+  }
+  agent: {
+    submit: (payload: unknown) => Promise<KernResult<{ missionId: string }>>
+    cancel: (payload: unknown) => Promise<KernResult<{ cancelled: boolean }>>
+    current: () => Promise<KernResult<AgentTranscript | null>>
+    history: (payload: unknown) => Promise<KernResult<AgentMissionSummary[]>>
+    transcript: (payload: unknown) => Promise<KernResult<AgentTranscript | null>>
+    onEvent: (callback: (event: AgentEvent) => void) => number
+    offEvent: (id: number) => void
   }
 }
 

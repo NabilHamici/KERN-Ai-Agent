@@ -17,7 +17,7 @@ export function SettingsDialog({ open, secretDraft, onDraft, onSave, onClear, on
             Close
           </button>
         </div>
-        <p className="hint">The provider is disconnected. A stored key is not a live model connection, and its value never returns to this window.</p>
+        <p className="hint">The key is encrypted on this Mac and used only by the main process for BharatCode. Its value never returns to this window.</p>
         <label className="secret-field">
           BharatCode API key
           <input

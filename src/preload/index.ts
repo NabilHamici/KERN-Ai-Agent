@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
+import { agentEventSchema, type AgentEvent } from '../shared/agent.ts'
 import {
   IpcChannel,
   parseRequest,
@@ -11,6 +12,7 @@ import {
 let nextSubscription = 1
 const dataListeners = new Map<number, (event: IpcRendererEvent, payload: unknown) => void>()
 const exitListeners = new Map<number, (event: IpcRendererEvent, payload: unknown) => void>()
+const agentListeners = new Map<number, (event: IpcRendererEvent, payload: unknown) => void>()
 
 async function invoke<T>(channel: RequestChannel, payload: unknown): Promise<IpcResult<T>> {
   const parsed = parseRequest(channel, payload)
@@ -90,6 +92,33 @@ const kern = {
   history: {
     missions: (payload: unknown) => invoke(IpcChannel.historyMissions, payload),
     fileChanges: (payload: unknown) => invoke(IpcChannel.historyFileChanges, payload)
+  },
+  agent: {
+    submit: (payload: unknown) => invoke(IpcChannel.agentSubmit, payload),
+    cancel: (payload: unknown) => invoke(IpcChannel.agentCancel, payload),
+    current: () => invoke(IpcChannel.agentCurrent, {}),
+    history: (payload: unknown) => invoke(IpcChannel.agentHistory, payload),
+    transcript: (payload: unknown) => invoke(IpcChannel.agentTranscript, payload),
+    onEvent: (callback: (event: AgentEvent) => void): number => {
+      const id = nextSubscription++
+      const listener = (_event: IpcRendererEvent, payload: unknown): void => {
+        const parsed = agentEventSchema.safeParse(payload)
+        if (parsed.success) {
+          callback(parsed.data)
+        }
+      }
+      agentListeners.set(id, listener)
+      ipcRenderer.on(IpcChannel.agentEvent, listener)
+      return id
+    },
+    offEvent: (id: number): void => {
+      const listener = agentListeners.get(id)
+      if (!listener) {
+        return
+      }
+      agentListeners.delete(id)
+      ipcRenderer.removeListener(IpcChannel.agentEvent, listener)
+    }
   }
 }
 

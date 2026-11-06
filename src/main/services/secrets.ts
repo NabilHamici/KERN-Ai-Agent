@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { safeStorage } from 'electron'
 import { writeFileAtomic } from './atomicWrite.ts'
+import { interpretDecryptResult } from './secretResult.ts'
 import type { SecretStatus } from '../../shared/ipc.ts'
 
 const SECRET_FILE = 'api-key.bin'
@@ -40,6 +41,24 @@ export async function storeSecret(userData: string, apiKey: string): Promise<voi
   fs.mkdirSync(userData, { recursive: true })
   writeFileAtomic(secretPath(userData), encrypted)
   fs.chmodSync(secretPath(userData), 0o600)
+}
+
+export async function readSecret(userData: string): Promise<string | null> {
+  requireAsyncStorage()
+  const storageAvailable = await safeStorage.isAsyncEncryptionAvailable()
+  if (!storageAvailable) {
+    throw new Error('Secure storage is unavailable on this system')
+  }
+  const target = secretPath(userData)
+  if (!fs.existsSync(target)) {
+    return null
+  }
+  const decrypted: unknown = await safeStorage.decryptStringAsync(fs.readFileSync(target))
+  const interpreted = interpretDecryptResult(decrypted as { result?: unknown; shouldReEncrypt?: unknown })
+  if (interpreted.reencrypt) {
+    await storeSecret(userData, interpreted.key)
+  }
+  return interpreted.key
 }
 
 export async function clearSecret(userData: string): Promise<void> {

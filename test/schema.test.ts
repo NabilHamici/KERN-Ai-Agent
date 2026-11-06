@@ -14,6 +14,8 @@ test('rejects invalid IPC payloads without echoing the API key', () => {
     [IpcChannel.secretsSet, { apiKey: secret, leaked: true }],
     [IpcChannel.secretsSet, { apiKey: `${secret}\n` }],
     [IpcChannel.terminalWrite, { data: 'x'.repeat(70_000) }],
+    [IpcChannel.agentSubmit, { prompt: 'inspect', extra: secret }],
+    [IpcChannel.agentCancel, { missionId: 'not-a-uuid' }],
     ['shell:exec', { command: 'rm -rf /' }]
   ] as const
 
@@ -28,6 +30,8 @@ test('rejects invalid IPC payloads without echoing the API key', () => {
 test('accepts a well-formed workspace and secret request', () => {
   const read = parseRequest(IpcChannel.workspaceRead, { path: 'src/main.ts' })
   assert.equal(read.ok, true)
+  const mission = parseRequest(IpcChannel.agentSubmit, { prompt: 'Read the workspace' })
+  assert.equal(mission.ok, true)
   const stored = parseRequest(IpcChannel.secretsSet, { apiKey: secret })
   assert.equal(stored.ok, true)
   if (stored.ok) {

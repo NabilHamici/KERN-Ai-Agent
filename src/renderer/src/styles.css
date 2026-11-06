@@ -479,6 +479,15 @@ button:disabled { opacity: 0.45; cursor: default; }
   font-size: 11px;
 }
 .change-row span:first-child { color: #c4b5fd; min-width: 48px; }
+button.change-row {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
 
 .agent-compose {
   padding: 12px;
@@ -574,3 +583,7 @@ button:disabled { opacity: 0.45; cursor: default; }
   font: inherit;
   padding: 0;
 }
+.agent-text, .tool-box pre { white-space: pre-wrap; user-select: text; }
+.agent-text { margin: 8px 0 0; color: #e2e8f0; line-height: 1.45; }
+.tool-box pre { margin: 0; max-height: 140px; overflow: auto; }
+.mission-pill.is-live { box-shadow: inset 0 0 0 1px rgba(167, 139, 250, 0.45); }

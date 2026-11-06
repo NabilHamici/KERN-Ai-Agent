@@ -1,7 +1,10 @@
 import { app, BrowserWindow, session } from 'electron'
 import path from 'node:path'
 import { registerIpc } from './ipc.ts'
+import { AgentRuntime } from './agent/runtime.ts'
+import { IpcChannel } from '../shared/ipc.ts'
 import { MissionDatabase } from './services/database.ts'
+import { readSecret } from './services/secrets.ts'
 import { TerminalService } from './services/terminal.ts'
 import { WorkspaceService } from './services/workspace.ts'
 import { runAcceptance } from './acceptance.ts'
@@ -16,6 +19,7 @@ if (acceptance && process.env.KERN_USER_DATA) {
 let mainWindow: BrowserWindow | null = null
 let database: MissionDatabase | null = null
 let terminal: TerminalService | null = null
+let agent: AgentRuntime | null = null
 
 function contentSecurityPolicy(): string {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL
@@ -109,6 +113,15 @@ void app.whenReady().then(async () => {
   database = new MissionDatabase(dbPath)
   const workspace = new WorkspaceService(database)
   terminal = new TerminalService()
+  const runtime = new AgentRuntime({
+    database,
+    currentWorkspace: () => workspace.current(),
+    readApiKey: () => readSecret(app.getPath('userData')),
+    emit: (event) => {
+      mainWindow?.webContents.send(IpcChannel.agentEvent, event)
+    }
+  })
+  agent = runtime
   if (acceptance && process.env.KERN_ACCEPTANCE_WORKSPACE) {
     workspace.open(process.env.KERN_ACCEPTANCE_WORKSPACE)
   } else {
@@ -118,6 +131,7 @@ void app.whenReady().then(async () => {
     getWindow: () => mainWindow,
     workspace,
     terminal,
+    agent: runtime,
     userData: app.getPath('userData')
   })
   await createWindow()
@@ -136,6 +150,7 @@ void app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => {
+  agent?.stopAll()
   terminal?.cancel()
   database?.close()
 })

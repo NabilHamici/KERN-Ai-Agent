@@ -10,6 +10,9 @@ type TopBarProps = {
   secretStatus: string
   secretAvailable: boolean
   secretConfigured: boolean
+  providerState: 'disconnected' | 'ready' | 'running'
+  missionTitle: string
+  missionLive: boolean
   onQuery: (value: string) => void
   onOpenFolder: () => void
   onOpenSettings: () => void
@@ -24,6 +27,9 @@ export function TopBar({
   secretStatus,
   secretAvailable,
   secretConfigured,
+  providerState,
+  missionTitle,
+  missionLive,
   onQuery,
   onOpenFolder,
   onOpenSettings
@@ -55,9 +61,9 @@ export function TopBar({
           <Icon name="chevron-down" />
         </button>
         <span className="vdiv" />
-        <div className="mission-pill" title="No mission is running. The agent runtime is not connected.">
+        <div className={missionLive ? 'mission-pill is-live' : 'mission-pill'} title={missionTitle}>
           <Icon name="zap" />
-          <span>No active mission</span>
+          <span>{missionTitle}</span>
         </div>
       </div>
 
@@ -79,10 +85,22 @@ export function TopBar({
       </div>
 
       <div className="cluster">
-        <div className="model-badge" data-provider="disconnected" title="No model provider is connected.">
+        <div
+          className="model-badge"
+          data-provider={providerState}
+          title={
+            providerState === 'running'
+              ? 'A BharatCode request is in progress.'
+              : providerState === 'ready'
+                ? 'A BharatCode API key is stored. No request is running.'
+                : 'No BharatCode API key is stored.'
+          }
+        >
           <Icon name="zap" className="tone-amber" />
-          <span>Provider</span>
-          <span className="badge-off">Disconnected</span>
+          <span>{providerState === 'disconnected' ? 'Provider' : 'BharatCode'}</span>
+          <span className="badge-off">
+            {providerState === 'running' ? 'Running' : providerState === 'ready' ? 'Ready' : 'Disconnected'}
+          </span>
         </div>
         <span data-secret-status className={keyClass}>
           {secretStatus}

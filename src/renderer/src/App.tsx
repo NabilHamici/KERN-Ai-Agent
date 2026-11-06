@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import packageJson from '../../../package.json'
+import type { AgentEvent, AgentMissionSummary, AgentToolRecord } from '../../shared/agent'
 import { AgentPanel } from './components/AgentPanel'
 import { BottomPanel } from './components/BottomPanel'
 import { EditorArea } from './components/EditorArea'
@@ -41,7 +42,13 @@ export function App() {
   const [leftOpen, setLeftOpen] = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
   const [bottomOpen, setBottomOpen] = useState(true)
+  const [agentMission, setAgentMission] = useState<AgentMissionSummary | null>(null)
+  const [agentHistory, setAgentHistory] = useState<AgentMissionSummary[]>([])
+  const [agentText, setAgentText] = useState('')
+  const [agentTools, setAgentTools] = useState<AgentToolRecord[]>([])
+  const [agentNotice, setAgentNotice] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
+  const terminalStatuses = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
   expandedRef.current = expanded
 
   const bump = (): void => {
@@ -131,6 +138,65 @@ export function App() {
       setDiagnostics([])
     }
   }, [activePath])
+
+  const applyTranscript = useCallback((transcript: { mission: AgentMissionSummary; messages: Array<{ role: string; content: string }>; tools: AgentToolRecord[] } | null): void => {
+    if (!transcript) {
+      return
+    }
+    setAgentMission(transcript.mission)
+    setAgentText(transcript.messages.filter((message) => message.role === 'assistant').map((message) => message.content).join(''))
+    setAgentTools(transcript.tools)
+    setAgentNotice(transcript.mission.error ?? '')
+  }, [])
+
+  const refreshAgentHistory = useCallback(async (): Promise<void> => {
+    const result = await window.kern.agent.history({ limit: 20 })
+    if (result.ok) {
+      setAgentHistory(result.data)
+    }
+  }, [])
+
+  useEffect(() => {
+    const id = window.kern.agent.onEvent((event: AgentEvent) => {
+      if (event.type === 'status') {
+        setAgentMission((current) =>
+          current && current.id === event.missionId
+            ? { ...current, status: event.status, title: event.title }
+            : { id: event.missionId, title: event.title, prompt: current?.prompt ?? event.title, status: event.status, iteration: 0, toolCalls: 0, summary: null, error: null, createdAt: '', updatedAt: '' }
+        )
+        return
+      }
+      if (event.type === 'text') {
+        setAgentText((current) => current + event.delta)
+        return
+      }
+      if (event.type === 'tool') {
+        setAgentTools((current) => {
+          const next = current.filter((tool) => tool.callId !== event.callId)
+          return [...next, { callId: event.callId, name: event.name, argumentsText: event.argumentsText, state: event.state, output: event.output ?? '' }]
+        })
+        return
+      }
+      if (event.type === 'error') {
+        setAgentNotice(event.message)
+        return
+      }
+      setAgentMission((current) => (current && current.id === event.missionId ? { ...current, status: event.status, summary: event.summary || current.summary } : current))
+      void refreshAgentHistory()
+      void window.kern.agent.transcript({ missionId: event.missionId }).then((result) => {
+        if (result.ok) {
+          applyTranscript(result.data)
+        }
+      })
+    })
+    void window.kern.agent.current().then((result) => {
+      if (result.ok) {
+        applyTranscript(result.data)
+      }
+    })
+    void refreshAgentHistory()
+    return () => window.kern.agent.offEvent(id)
+  }, [applyTranscript, refreshAgentHistory])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -344,6 +410,54 @@ export function App() {
     await refreshHistory()
   }
 
+  async function submitMission(prompt: string): Promise<void> {
+    setAgentText('')
+    setAgentTools([])
+    setAgentNotice('')
+    const result = await window.kern.agent.submit({ prompt })
+    if (!result.ok) {
+      setError(result.error)
+      setAgentNotice(result.error)
+      return
+    }
+    setAgentMission((current) =>
+      current && current.id === result.data.missionId
+        ? current
+        : {
+            id: result.data.missionId,
+            title: prompt,
+            prompt,
+            status: 'queued',
+            iteration: 0,
+            toolCalls: 0,
+            summary: null,
+            error: null,
+            createdAt: '',
+            updatedAt: ''
+          }
+    )
+    setError('')
+  }
+
+  async function cancelMission(): Promise<void> {
+    if (!agentMission) {
+      return
+    }
+    const result = await window.kern.agent.cancel({ missionId: agentMission.id })
+    if (!result.ok) {
+      setAgentNotice(result.error)
+    }
+  }
+
+  async function showMission(missionId: string): Promise<void> {
+    const result = await window.kern.agent.transcript({ missionId })
+    if (!result.ok) {
+      setAgentNotice(result.error)
+      return
+    }
+    applyTranscript(result.data)
+  }
+
   async function cancelTerminal(): Promise<void> {
     const result = await window.kern.terminal.cancel()
     if (!result.ok) {
@@ -351,6 +465,8 @@ export function App() {
     }
   }
 
+  const agentRunning = Boolean(agentMission && !terminalStatuses.has(agentMission.status))
+  const providerState = !secretAvailable || !secretConfigured ? 'disconnected' : agentRunning ? 'running' : 'ready'
   const errorCount = diagnostics.filter((item) => item.severity === 'error').length
   const warningCount = diagnostics.filter((item) => item.severity === 'warning').length
 
@@ -365,6 +481,9 @@ export function App() {
         secretStatus={secretLabel(secretAvailable, secretConfigured)}
         secretAvailable={secretAvailable}
         secretConfigured={secretConfigured}
+        providerState={providerState}
+        missionTitle={agentRunning && agentMission ? agentMission.title : 'No active mission'}
+        missionLive={agentRunning}
         onQuery={(value) => {
           setQuery(value)
           if (value.trim()) {
@@ -437,7 +556,24 @@ export function App() {
             onCancel={() => void cancelTerminal()}
           />
         </div>
-        {rightOpen ? <AgentPanel changes={changes} sessions={sessions} onClose={() => setRightOpen(false)} /> : null}
+        {rightOpen ? (
+          <AgentPanel
+            changes={changes}
+            sessions={sessions}
+            providerReady={secretAvailable && secretConfigured}
+            workspaceOpen={Boolean(workspace)}
+            mission={agentMission}
+            running={agentRunning}
+            text={agentText}
+            tools={agentTools}
+            history={agentHistory}
+            notice={agentNotice}
+            onSubmit={(prompt) => void submitMission(prompt)}
+            onCancel={() => void cancelMission()}
+            onSelect={(missionId) => void showMission(missionId)}
+            onClose={() => setRightOpen(false)}
+          />
+        ) : null}
       </div>
       </div>
       <footer className="statusbar">
@@ -459,7 +595,9 @@ export function App() {
           ) : null}
         </div>
         <div className="status-group">
-          <span className="footer-link">Provider disconnected</span>
+          <span className="footer-link">
+            {providerState === 'running' ? 'BharatCode running' : providerState === 'ready' ? 'BharatCode ready' : 'Provider disconnected'}
+          </span>
           <span>
             Ln {cursor.line}, Col {cursor.column}
           </span>

@@ -1,7 +1,9 @@
 import { dialog, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
+import { AgentError } from '../shared/agent.ts'
 import { PathJailError } from './security/pathJail.ts'
 import { IpcChannel, parseRequest, requestSchemas, type IpcResult, type RequestChannel } from '../shared/ipc.ts'
 import { clearSecret, secretStatus, storeSecret } from './services/secrets.ts'
+import type { AgentRuntime } from './agent/runtime.ts'
 import type { WorkspaceService } from './services/workspace.ts'
 import type { TerminalService } from './services/terminal.ts'
 
@@ -18,11 +20,12 @@ export type IpcHost = {
   getWindow: () => BrowserWindow | null
   workspace: WorkspaceService
   terminal: TerminalService
+  agent: AgentRuntime
   userData: string
 }
 
 function publicError(error: unknown): string {
-  if (error instanceof PathJailError) {
+  if (error instanceof AgentError || error instanceof PathJailError) {
     return error.message
   }
   if (error instanceof Error && KNOWN_ERRORS.has(error.message)) {
@@ -132,6 +135,24 @@ async function dispatch(channel: RequestChannel, payload: unknown, host: IpcHost
     case IpcChannel.historyFileChanges: {
       const { limit } = payload as { limit?: number }
       return host.workspace.listFileChanges(limit)
+    }
+    case IpcChannel.agentSubmit: {
+      const { prompt } = payload as { prompt: string }
+      return host.agent.submit(prompt)
+    }
+    case IpcChannel.agentCancel: {
+      const { missionId } = payload as { missionId: string }
+      return host.agent.cancel(missionId)
+    }
+    case IpcChannel.agentCurrent:
+      return host.agent.current()
+    case IpcChannel.agentHistory: {
+      const { limit } = payload as { limit?: number }
+      return host.agent.history(limit)
+    }
+    case IpcChannel.agentTranscript: {
+      const { missionId } = payload as { missionId: string }
+      return host.agent.transcript(missionId)
     }
     default: {
       const unexpected: never = channel
