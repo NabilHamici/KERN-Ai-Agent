@@ -1,50 +1,109 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { EditorPane } from './EditorPane'
-import { TerminalPane } from './TerminalPane'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import packageJson from '../../../package.json'
+import { AgentPanel } from './components/AgentPanel'
+import { BottomPanel } from './components/BottomPanel'
+import { EditorArea } from './components/EditorArea'
+import { Explorer } from './components/Explorer'
+import { SettingsDialog } from './components/SettingsDialog'
+import { TopBar } from './components/TopBar'
+import type { EditorDiagnostic } from './EditorPane'
+import { hasExternalChange, isDirty, isSessionRecord, secretLabel, type SessionRecord } from './editorState'
 import type { DirectoryEntry } from '../../shared/ipc'
 
 type WorkspaceInfo = { path: string; name: string }
-type FileChange = { relativePath: string; changeType: string; createdAt: string }
+type FileChange = { relativePath: string; changeType: string; createdAt: string; hasReverse: boolean }
+type BufferState = { baseline: string; value: string }
 
 export function App() {
+  const buffers = useRef(new Map<string, BufferState>())
+  const reader = useRef<() => string>(() => '')
+  const expandedRef = useRef<Record<string, DirectoryEntry[]>>({})
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null)
   const [entries, setEntries] = useState<DirectoryEntry[]>([])
   const [expanded, setExpanded] = useState<Record<string, DirectoryEntry[]>>({})
-  const [openPath, setOpenPath] = useState<string | null>(null)
-  const [initialValue, setInitialValue] = useState('')
+  const [tabs, setTabs] = useState<string[]>([])
+  const [activePath, setActivePath] = useState<string | null>(null)
+  const [loadedValue, setLoadedValue] = useState('')
+  const [revision, setRevision] = useState(0)
+  const [conflict, setConflict] = useState<{ path: string; disk: string } | null>(null)
   const [changes, setChanges] = useState<FileChange[]>([])
+  const [sessions, setSessions] = useState<SessionRecord[]>([])
   const [secretConfigured, setSecretConfigured] = useState(false)
   const [secretAvailable, setSecretAvailable] = useState(true)
   const [secretDraft, setSecretDraft] = useState('')
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [error, setError] = useState('')
-  const readEditor = useCallback(() => initialValue, [initialValue])
-  const editorReader = useState<{ current: () => string }>({ current: readEditor })[0]
+  const [treeLoading, setTreeLoading] = useState(false)
+  const [opening, setOpening] = useState(false)
+  const [cursor, setCursor] = useState({ line: 1, column: 1 })
+  const [diagnostics, setDiagnostics] = useState<EditorDiagnostic[]>([])
+  const [query, setQuery] = useState('')
+  const [leftOpen, setLeftOpen] = useState(true)
+  const [rightOpen, setRightOpen] = useState(true)
+  const [bottomOpen, setBottomOpen] = useState(true)
+  const searchRef = useRef<HTMLInputElement>(null)
+  expandedRef.current = expanded
 
-  const fail = (message: string): void => {
-    setError(message)
+  const bump = (): void => {
+    setRevision((value) => value + 1)
   }
 
-  const refreshTree = useCallback(async (): Promise<void> => {
-    const listed = await window.kern.workspace.list({ path: '.' })
-    if (!listed.ok) {
-      fail(listed.error)
-      return
+  const resetEditor = (): void => {
+    buffers.current.clear()
+    setTabs([])
+    setActivePath(null)
+    setLoadedValue('')
+    setConflict(null)
+    setDiagnostics([])
+  }
+
+  const listDirectory = useCallback(async (path: string): Promise<DirectoryEntry[]> => {
+    const result = await window.kern.workspace.list({ path })
+    if (!result.ok) {
+      throw new Error(result.error)
     }
-    setEntries(listed.data)
-    setExpanded({})
+    return result.data
+  }, [])
+
+  const refreshTree = useCallback(async (): Promise<void> => {
+    setTreeLoading(true)
+    try {
+      const listed = await window.kern.workspace.list({ path: '.' })
+      if (!listed.ok) {
+        setError(listed.error)
+        return
+      }
+      setEntries(listed.data)
+      const next: Record<string, DirectoryEntry[]> = {}
+      for (const path of Object.keys(expandedRef.current)) {
+        const children = await window.kern.workspace.list({ path })
+        if (children.ok) {
+          next[path] = children.data
+        }
+      }
+      setExpanded(next)
+    } finally {
+      setTreeLoading(false)
+    }
   }, [])
 
   const refreshHistory = useCallback(async (): Promise<void> => {
-    const result = await window.kern.history.fileChanges({ limit: 20 })
-    if (result.ok) {
-      setChanges(result.data)
+    const [fileResult, missionResult] = await Promise.all([
+      window.kern.history.fileChanges({ limit: 20 }),
+      window.kern.history.missions({ limit: 12 })
+    ])
+    if (fileResult.ok) {
+      setChanges(fileResult.data)
+    }
+    if (missionResult.ok) {
+      setSessions(missionResult.data.filter(isSessionRecord))
     }
   }, [])
 
   const refreshSecret = useCallback(async (): Promise<void> => {
     const result = await window.kern.secrets.status()
     if (!result.ok) {
-      fail(result.error)
+      setError(result.error)
       return
     }
     setSecretConfigured(result.data.configured)
@@ -55,7 +114,7 @@ export function App() {
     void (async () => {
       const current = await window.kern.workspace.current()
       if (!current.ok) {
-        fail(current.error)
+        setError(current.error)
         return
       }
       setWorkspace(current.data)
@@ -67,25 +126,54 @@ export function App() {
     })()
   }, [refreshHistory, refreshSecret, refreshTree])
 
+  useEffect(() => {
+    if (!activePath) {
+      setDiagnostics([])
+    }
+  }, [activePath])
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setLeftOpen(true)
+        searchRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   async function openFolder(): Promise<void> {
     const selected = await window.kern.workspace.select()
     if (!selected.ok) {
-      fail(selected.error)
+      setError(selected.error)
       return
     }
     if (selected.data.canceled) {
       return
     }
+    resetEditor()
+    setExpanded({})
     setWorkspace(selected.data.workspace)
-    setOpenPath(null)
     setError('')
     await refreshTree()
     await refreshHistory()
   }
 
-  async function openFile(entry: DirectoryEntry): Promise<void> {
+  function activate(path: string): void {
+    const buffer = buffers.current.get(path)
+    if (!buffer || path === activePath) {
+      return
+    }
+    setActivePath(path)
+    setLoadedValue(buffer.value)
+    setConflict((current) => (current?.path === path ? current : null))
+  }
+
+  async function openEntry(entry: DirectoryEntry): Promise<void> {
     if (entry.blocked) {
-      fail('Path escapes the workspace')
+      setError('Path escapes the workspace')
       return
     }
     if (entry.kind === 'directory') {
@@ -97,53 +185,122 @@ export function App() {
         })
         return
       }
-      const listed = await window.kern.workspace.list({ path: entry.relativePath })
-      if (!listed.ok) {
-        fail(listed.error)
-        return
+      try {
+        const children = await listDirectory(entry.relativePath)
+        setExpanded((current) => ({ ...current, [entry.relativePath]: children }))
+        setError('')
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : 'Unable to open folder')
       }
-      setExpanded((current) => ({ ...current, [entry.relativePath]: listed.data }))
       return
     }
+    const existing = buffers.current.get(entry.relativePath)
+    if (existing) {
+      setTabs((current) => (current.includes(entry.relativePath) ? current : [...current, entry.relativePath]))
+      activate(entry.relativePath)
+      return
+    }
+    setOpening(true)
     const result = await window.kern.workspace.read({ path: entry.relativePath })
+    setOpening(false)
     if (!result.ok) {
-      fail(result.error)
+      setError(result.error)
       return
     }
+    buffers.current.set(entry.relativePath, { baseline: result.data.content, value: result.data.content })
+    setTabs((current) => [...current, entry.relativePath])
+    setActivePath(entry.relativePath)
+    setLoadedValue(result.data.content)
+    setConflict(null)
     setError('')
-    setOpenPath(entry.relativePath)
-    setInitialValue(result.data.content)
   }
 
-  async function save(): Promise<void> {
-    if (!openPath) {
+  function closeTab(path: string): void {
+    const buffer = buffers.current.get(path)
+    if (buffer && isDirty(buffer.baseline, buffer.value) && !window.confirm(`Close ${path} without saving?`)) {
       return
     }
-    const content = editorReader.current()
-    const result = await window.kern.workspace.write({ path: openPath, content })
-    if (!result.ok) {
-      fail(result.error)
+    buffers.current.delete(path)
+    const remaining = tabs.filter((tab) => tab !== path)
+    setTabs(remaining)
+    if (activePath !== path) {
       return
     }
-    setInitialValue(content)
+    const next = remaining[remaining.length - 1] ?? null
+    setActivePath(next)
+    setLoadedValue(next ? (buffers.current.get(next)?.value ?? '') : '')
+    setConflict(null)
+  }
+
+  async function save(force: boolean): Promise<void> {
+    if (!activePath) {
+      return
+    }
+    const buffer = buffers.current.get(activePath)
+    if (!buffer) {
+      return
+    }
+    const content = reader.current()
+    buffer.value = content
+    const disk = await window.kern.workspace.read({ path: activePath })
+    if (!disk.ok) {
+      setError(disk.error)
+      return
+    }
+    if (!force && hasExternalChange(buffer.baseline, disk.data.content)) {
+      setConflict({ path: activePath, disk: disk.data.content })
+      setError('Save blocked because the file changed on disk.')
+      bump()
+      return
+    }
+    const written = await window.kern.workspace.write({ path: activePath, content })
+    if (!written.ok) {
+      setError(written.error)
+      return
+    }
+    buffer.baseline = content
+    buffer.value = content
+    setConflict(null)
     setError('')
+    bump()
     await refreshHistory()
   }
 
+  function reloadFromDisk(): void {
+    if (!conflict || conflict.path !== activePath) {
+      return
+    }
+    const buffer = buffers.current.get(conflict.path)
+    if (!buffer) {
+      return
+    }
+    buffer.baseline = conflict.disk
+    buffer.value = conflict.disk
+    setLoadedValue(conflict.disk)
+    setConflict(null)
+    setError('')
+    bump()
+  }
+
   async function removeOpenFile(): Promise<void> {
-    if (!openPath) {
+    if (!activePath) {
       return
     }
-    if (!window.confirm(`Delete ${openPath}?`)) {
+    if (!window.confirm(`Delete ${activePath}?`)) {
       return
     }
-    const result = await window.kern.workspace.remove({ path: openPath, confirm: true })
+    const result = await window.kern.workspace.remove({ path: activePath, confirm: true })
     if (!result.ok) {
-      fail(result.error)
+      setError(result.error)
       return
     }
-    setOpenPath(null)
-    setInitialValue('')
+    buffers.current.delete(activePath)
+    const remaining = tabs.filter((tab) => tab !== activePath)
+    const next = remaining[remaining.length - 1] ?? null
+    setTabs(remaining)
+    setActivePath(next)
+    setLoadedValue(next ? (buffers.current.get(next)?.value ?? '') : '')
+    setError('')
     await refreshTree()
     await refreshHistory()
   }
@@ -152,7 +309,7 @@ export function App() {
     const result = await window.kern.secrets.set({ apiKey: secretDraft })
     setSecretDraft('')
     if (!result.ok) {
-      fail(result.error)
+      setError(result.error)
       return
     }
     setError('')
@@ -162,130 +319,163 @@ export function App() {
   async function clearSecret(): Promise<void> {
     const result = await window.kern.secrets.clear()
     if (!result.ok) {
-      fail(result.error)
+      setError(result.error)
       return
     }
     setSecretDraft('')
     await refreshSecret()
   }
 
-  function renderEntries(rows: DirectoryEntry[], depth: number): ReactNode {
-    return rows.map((entry) => (
-      <div key={entry.relativePath}>
-        <button
-          type="button"
-          className="file-row"
-          style={{ paddingLeft: 12 + depth * 14 }}
-          data-path={entry.relativePath}
-          data-kind={entry.kind}
-          data-blocked={entry.blocked ? 'true' : 'false'}
-          data-active={entry.relativePath === openPath ? 'true' : 'false'}
-          onClick={() => void openFile(entry)}
-        >
-          {entry.kind === 'directory' ? '▸ ' : ''}
-          {entry.name}
-          {entry.blocked ? ' blocked' : ''}
-        </button>
-        {expanded[entry.relativePath] ? renderEntries(expanded[entry.relativePath], depth + 1) : null}
-      </div>
-    ))
+  async function createFile(): Promise<void> {
+    if (!workspace) {
+      return
+    }
+    const relative = window.prompt('File path inside the workspace')
+    if (!relative?.trim()) {
+      return
+    }
+    const result = await window.kern.workspace.createFile({ path: relative.trim(), content: '' })
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    setError('')
+    await refreshTree()
+    await refreshHistory()
   }
 
   async function cancelTerminal(): Promise<void> {
     const result = await window.kern.terminal.cancel()
     if (!result.ok) {
-      fail(result.error)
+      setError(result.error)
     }
   }
 
+  const errorCount = diagnostics.filter((item) => item.severity === 'error').length
+  const warningCount = diagnostics.filter((item) => item.severity === 'warning').length
+
   return (
     <div className="app">
-      <header className="topbar">
-        <span className="mark">KERN</span>
-        <span className="workspace-path" data-workspace-path={workspace?.path ?? ''}>
-          {workspace ? workspace.path : 'No folder open'}
-        </span>
-        <span className="spacer" />
-        <button type="button" data-action="refresh" onClick={() => void refreshTree()} disabled={!workspace}>
-          Refresh
-        </button>
-        <button type="button" data-action="open" onClick={() => void openFolder()}>
-          Open folder
-        </button>
-      </header>
-      <div className="workspace">
-        <aside className="files">
-          <h2 className="section-title">Files</h2>
-          {renderEntries(entries, 0)}
-        </aside>
-        <main className="editor">
-          {openPath ? (
-            <>
-              <div className="editor-bar">
-                <span>{openPath}</span>
-                <span className="spacer" />
-                <button type="button" data-action="save" onClick={() => void save()}>
-                  Save
-                </button>
-                <button type="button" data-action="delete" onClick={() => void removeOpenFile()}>
-                  Delete
-                </button>
-              </div>
-              <EditorPane
-                path={openPath}
-                initialValue={initialValue}
-                onReady={(getValue) => {
-                  editorReader.current = getValue
-                }}
-              />
-            </>
-          ) : (
-            <div className="empty">
-              <div>
-                <p>Open a project folder, then choose a file.</p>
-                <p>KERN keeps filesystem and shell access in the main process.</p>
-              </div>
-            </div>
-          )}
-        </main>
-        <aside className="activity">
-          <h2 className="section-title">Secure storage</h2>
-          <div className="secret-box">
-            <div data-secret-status className={secretConfigured ? 'ok' : ''}>
-              {!secretAvailable ? 'Secure storage unavailable' : secretConfigured ? 'Key stored' : 'No key'}
-            </div>
-            <input
-              data-secret-input
-              type="password"
-              autoComplete="off"
-              spellCheck={false}
-              value={secretDraft}
-              placeholder="BharatCode API key"
-              onChange={(event) => setSecretDraft(event.target.value)}
-            />
-            <div className="row">
-              <button type="button" data-action="secret-save" onClick={() => void saveSecret()} disabled={!secretDraft}>
-                Save key
-              </button>
-              <button type="button" data-action="secret-clear" onClick={() => void clearSecret()}>
-                Clear
-              </button>
-            </div>
-          </div>
-          <h2 className="section-title">File changes</h2>
-          <div className="activity-block">
-            {changes.length === 0 ? <div className="workspace-path">No saved changes yet</div> : null}
-            {changes.map((change) => (
-              <div key={`${change.createdAt}-${change.relativePath}`} className="change-row" data-file-change={change.relativePath}>
-                <span>{change.changeType}</span>
-                {change.relativePath}
-              </div>
-            ))}
-          </div>
-          {error ? <p className="error">{error}</p> : null}
-        </aside>
+      <TopBar
+        projectName={workspace?.name ?? 'Open folder'}
+        workspacePath={workspace?.path ?? ''}
+        version={packageJson.version}
+        query={query}
+        searchRef={searchRef}
+        secretStatus={secretLabel(secretAvailable, secretConfigured)}
+        secretAvailable={secretAvailable}
+        secretConfigured={secretConfigured}
+        onQuery={(value) => {
+          setQuery(value)
+          if (value.trim()) {
+            setLeftOpen(true)
+          }
+        }}
+        onOpenFolder={() => void openFolder()}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+      <div className="work">
+      {error ? (
+        <p className="banner" role="alert">
+          {error}
+        </p>
+      ) : null}
+      <div className="shell">
+        {leftOpen ? (
+          <Explorer
+            projectName={workspace?.name ?? 'No folder'}
+            entries={entries}
+            expanded={expanded}
+            activePath={activePath}
+            loading={treeLoading}
+            query={query}
+            refreshDisabled={!workspace}
+            canCreate={Boolean(workspace)}
+            onOpen={(entry) => void openEntry(entry)}
+            onRefresh={() => void refreshTree()}
+            onCreateFile={() => void createFile()}
+            onClose={() => setLeftOpen(false)}
+            listDirectory={listDirectory}
+          />
+        ) : null}
+        <div className="center">
+          <EditorArea
+            tabs={tabs}
+            activePath={activePath}
+            loadedValue={loadedValue}
+            buffers={buffers.current}
+            revision={revision}
+            opening={opening}
+            conflict={conflict}
+            explorerHidden={!leftOpen}
+            onShowExplorer={() => setLeftOpen(true)}
+            onActivate={activate}
+            onClose={closeTab}
+            onSave={() => void save(false)}
+            onOverwrite={() => void save(true)}
+            onReload={reloadFromDisk}
+            onDelete={() => void removeOpenFile()}
+            onReady={(getValue) => {
+              reader.current = getValue
+            }}
+            onChange={(path, value) => {
+              const buffer = buffers.current.get(path)
+              if (!buffer || buffer.value === value) {
+                return
+              }
+              buffer.value = value
+              bump()
+            }}
+            onCursor={setCursor}
+            onDiagnostics={setDiagnostics}
+          />
+          <BottomPanel
+            workspacePath={workspace?.path ?? null}
+            diagnostics={diagnostics}
+            open={bottomOpen}
+            onClose={() => setBottomOpen(false)}
+            onCancel={() => void cancelTerminal()}
+          />
+        </div>
+        {rightOpen ? <AgentPanel changes={changes} sessions={sessions} onClose={() => setRightOpen(false)} /> : null}
       </div>
-      <TerminalPane workspacePath={workspace?.path ?? null} onCancel={() => void cancelTerminal()} />
+      </div>
+      <footer className="statusbar">
+        <div className="status-group">
+          <span>
+            <span className="ready-dot" /> {workspace ? 'KERN Ready' : 'No workspace'}
+          </span>
+          <span>UTF-8</span>
+          <span>Spaces: 2</span>
+          {!bottomOpen ? (
+            <button type="button" className="footer-link" onClick={() => setBottomOpen(true)}>
+              Show terminal
+            </button>
+          ) : null}
+          {!rightOpen ? (
+            <button type="button" className="footer-link" onClick={() => setRightOpen(true)}>
+              Show agent
+            </button>
+          ) : null}
+        </div>
+        <div className="status-group">
+          <span className="footer-link">Provider disconnected</span>
+          <span>
+            Ln {cursor.line}, Col {cursor.column}
+          </span>
+          <span>
+            {errorCount} Error{errorCount === 1 ? '' : 's'}, {warningCount} Warning{warningCount === 1 ? '' : 's'}
+          </span>
+        </div>
+      </footer>
+      <SettingsDialog
+        open={settingsOpen}
+        secretDraft={secretDraft}
+        onDraft={setSecretDraft}
+        onSave={() => void saveSecret()}
+        onClear={() => void clearSecret()}
+        onClose={() => setSettingsOpen(false)}
+      />
     </div>
   )
 }

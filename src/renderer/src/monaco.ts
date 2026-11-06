@@ -28,6 +28,40 @@ export function installMonaco(): void {
     }
   }
 
+  const diagnostics = { noSemanticValidation: true, noSyntaxValidation: false }
+  monaco.typescript.typescriptDefaults.setDiagnosticsOptions(diagnostics)
+  monaco.typescript.javascriptDefaults.setDiagnosticsOptions(diagnostics)
+  const compilerOptions = {
+    jsx: monaco.typescript.JsxEmit.ReactJSX,
+    target: monaco.typescript.ScriptTarget.ESNext,
+    module: monaco.typescript.ModuleKind.ESNext,
+    moduleResolution: monaco.typescript.ModuleResolutionKind.NodeJs,
+    allowNonTsExtensions: true,
+    esModuleInterop: true,
+    strict: true
+  }
+  monaco.typescript.typescriptDefaults.setCompilerOptions(compilerOptions)
+  monaco.typescript.javascriptDefaults.setCompilerOptions(compilerOptions)
+
+  monaco.editor.defineTheme('kern-dark', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: 'comment', foreground: '6E7681' },
+      { token: 'string', foreground: '9DB8D4' },
+      { token: 'keyword', foreground: 'A99BFF' }
+    ],
+    colors: {
+      'editor.background': '#0D0E11',
+      'editor.foreground': '#C9D1D9',
+      'editorLineNumber.foreground': '#5C6570',
+      'editorLineNumber.activeForeground': '#A99BFF',
+      'editorCursor.foreground': '#8B7CFF',
+      'editor.selectionBackground': '#3A347866',
+      'editor.lineHighlightBackground': '#161922'
+    }
+  })
+
   if (new URLSearchParams(window.location.search).get('acceptance') === '1') {
     window.__kernEditors = () => monaco.editor.getEditors()
   }

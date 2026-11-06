@@ -30,8 +30,12 @@ type KernBridge = {
     offExit: (id: number) => void
   }
   history: {
-    missions: (payload: unknown) => Promise<KernResult<unknown[]>>
-    fileChanges: (payload: unknown) => Promise<KernResult<Array<{ relativePath: string; changeType: string; createdAt: string }>>>
+    missions: (payload: unknown) => Promise<
+      KernResult<Array<{ id: string; title: string; status: string; createdAt: string }>>
+    >
+    fileChanges: (payload: unknown) => Promise<
+      KernResult<Array<{ relativePath: string; changeType: string; createdAt: string; hasReverse: boolean }>>
+    >
   }
 }
 

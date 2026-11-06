@@ -7,6 +7,7 @@ type Session = {
   pty: IPty
   pid: number
   shell: string
+  onExit: (exitCode: number) => void
 }
 
 const SHELL_CANDIDATES = ['/bin/zsh', '/bin/bash', '/bin/sh']
@@ -38,7 +39,7 @@ export class TerminalService {
     if (!fs.statSync(cwd).isDirectory()) {
       throw new Error('No workspace is open')
     }
-    this.cancel()
+    this.stop(false)
     const shell = executableShell()
     const pty = spawn(shell, ['-i'], {
       name: 'xterm-256color',
@@ -47,12 +48,13 @@ export class TerminalService {
       cols: 80,
       rows: 24
     })
-    this.session = { pty, pid: pty.pid, shell }
+    this.session = { pty, pid: pty.pid, shell, onExit }
     pty.onData(onData)
     pty.onExit(({ exitCode }) => {
-      if (this.session?.pid === pty.pid) {
-        this.session = null
+      if (this.session?.pid !== pty.pid) {
+        return
       }
+      this.session = null
       onExit(exitCode)
     })
     return { shell }
@@ -73,10 +75,15 @@ export class TerminalService {
   }
 
   cancel(): { stopped: boolean } {
+    return this.stop(true)
+  }
+
+  private stop(notify: boolean): { stopped: boolean } {
     const session = this.session
     if (!session) {
       return { stopped: true }
     }
+    this.session = null
     killProcessGroup(session.pid)
     try {
       session.pty.kill()
@@ -84,7 +91,9 @@ export class TerminalService {
       // The process group signal already ended the session.
     }
     const stopped = !isAlive(session.pid)
-    this.session = null
+    if (notify) {
+      session.onExit(0)
+    }
     return { stopped }
   }
 

@@ -60,12 +60,12 @@ function installSessionGuards(): void {
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
     width: 1440,
-    height: 920,
+    height: 900,
     minWidth: 960,
     minHeight: 640,
     show: false,
     title: 'KERN',
-    backgroundColor: '#101114',
+    backgroundColor: '#0D0E11',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
