@@ -27,7 +27,8 @@ test('renderer and preload do not import privileged modules', () => {
     'Authorization: Bearer',
     'bc_live_',
     'bharatcode.ai',
-    'node:sqlite'
+    'node:sqlite',
+    '@cursor/sdk'
   ]
   const files = [
     ...sourceFiles(path.join('src', 'renderer')),

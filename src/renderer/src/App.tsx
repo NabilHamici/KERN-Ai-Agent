@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import packageJson from '../../../package.json'
-import type { AgentEvent, AgentMissionSummary, AgentToolRecord } from '../../shared/agent'
+import type { AgentEvent, AgentMissionSummary, AgentToolRecord, AgentTranscript } from '../../shared/agent'
+import {
+  appendStreamDelta,
+  appendToolActivity,
+  conversationFromTranscript,
+  sealConversation,
+  type ConversationEntry
+} from './conversation'
+import { connectionLabel, type ConnectionState, type ProviderId } from '../../shared/provider'
 import { AgentPanel } from './components/AgentPanel'
 import { BottomPanel } from './components/BottomPanel'
 import { EditorArea } from './components/EditorArea'
@@ -32,6 +40,10 @@ export function App() {
   const [secretConfigured, setSecretConfigured] = useState(false)
   const [secretAvailable, setSecretAvailable] = useState(true)
   const [secretDraft, setSecretDraft] = useState('')
+  const [providerChoice, setProviderChoice] = useState<ProviderId>('bharatcode')
+  const [connection, setConnection] = useState<ConnectionState>('not_configured')
+  const [providerDetail, setProviderDetail] = useState('No BharatCode API key is stored.')
+  const [tokenNote, setTokenNote] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [error, setError] = useState('')
   const [treeLoading, setTreeLoading] = useState(false)
@@ -44,10 +56,14 @@ export function App() {
   const [bottomOpen, setBottomOpen] = useState(true)
   const [agentMission, setAgentMission] = useState<AgentMissionSummary | null>(null)
   const [agentHistory, setAgentHistory] = useState<AgentMissionSummary[]>([])
-  const [agentText, setAgentText] = useState('')
+  const [conversation, setConversation] = useState<ConversationEntry[]>([])
   const [agentTools, setAgentTools] = useState<AgentToolRecord[]>([])
   const [agentNotice, setAgentNotice] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
+  const shownMission = useRef<string | null>(null)
+  const pendingPrompt = useRef('')
+  const armNextMission = useRef(false)
+  const streamStarted = useRef(false)
   const terminalStatuses = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
   expandedRef.current = expanded
 
@@ -107,6 +123,19 @@ export function App() {
     }
   }, [])
 
+  const applyProvider = useCallback((status: { provider: ProviderId; state: ConnectionState; detail: string }): void => {
+    setProviderChoice(status.provider)
+    setConnection(status.state)
+    setProviderDetail(status.detail)
+  }, [])
+
+  const refreshProvider = useCallback(async (): Promise<void> => {
+    const result = await window.kern.provider.get()
+    if (result.ok) {
+      applyProvider(result.data)
+    }
+  }, [applyProvider])
+
   const refreshSecret = useCallback(async (): Promise<void> => {
     const result = await window.kern.secrets.status()
     if (!result.ok) {
@@ -130,8 +159,9 @@ export function App() {
         await refreshHistory()
       }
       await refreshSecret()
+      await refreshProvider()
     })()
-  }, [refreshHistory, refreshSecret, refreshTree])
+  }, [refreshHistory, refreshProvider, refreshSecret, refreshTree])
 
   useEffect(() => {
     if (!activePath) {
@@ -139,12 +169,15 @@ export function App() {
     }
   }, [activePath])
 
-  const applyTranscript = useCallback((transcript: { mission: AgentMissionSummary; messages: Array<{ role: string; content: string }>; tools: AgentToolRecord[] } | null): void => {
+  const applyTranscript = useCallback((transcript: AgentTranscript | null): void => {
     if (!transcript) {
       return
     }
+    shownMission.current = transcript.mission.id
+    armNextMission.current = false
+    streamStarted.current = false
     setAgentMission(transcript.mission)
-    setAgentText(transcript.messages.filter((message) => message.role === 'assistant').map((message) => message.content).join(''))
+    setConversation(conversationFromTranscript(transcript))
     setAgentTools(transcript.tools)
     setAgentNotice(transcript.mission.error ?? '')
   }, [])
@@ -157,8 +190,23 @@ export function App() {
   }, [])
 
   useEffect(() => {
+    const accepts = (missionId: string): boolean => {
+      if (armNextMission.current) {
+        armNextMission.current = false
+        streamStarted.current = true
+        shownMission.current = missionId
+        setConversation([{ key: 'user', role: 'user', content: pendingPrompt.current, streaming: false }])
+        setAgentTools([])
+        setAgentNotice('')
+        return true
+      }
+      return shownMission.current === missionId
+    }
     const id = window.kern.agent.onEvent((event: AgentEvent) => {
       if (event.type === 'status') {
+        if (accepts(event.missionId)) {
+          setConversation((current) => sealConversation(current))
+        }
         setAgentMission((current) =>
           current && current.id === event.missionId
             ? { ...current, status: event.status, title: event.title }
@@ -167,10 +215,24 @@ export function App() {
         return
       }
       if (event.type === 'text') {
-        setAgentText((current) => current + event.delta)
+        if (!accepts(event.missionId)) {
+          return
+        }
+        setConversation((current) => appendStreamDelta(current, event.delta))
         return
       }
       if (event.type === 'tool') {
+        if (!accepts(event.missionId)) {
+          return
+        }
+        setConversation((current) =>
+          appendToolActivity(current, {
+            callId: event.callId,
+            name: event.name,
+            argumentsText: event.argumentsText,
+            state: event.state
+          })
+        )
         setAgentTools((current) => {
           const next = current.filter((tool) => tool.callId !== event.callId)
           return [...next, { callId: event.callId, name: event.name, argumentsText: event.argumentsText, state: event.state, output: event.output ?? '' }]
@@ -181,10 +243,14 @@ export function App() {
         setAgentNotice(event.message)
         return
       }
+      if (event.usage) {
+        setTokenNote(`${event.usage.totalTokens} tokens`)
+      }
       setAgentMission((current) => (current && current.id === event.missionId ? { ...current, status: event.status, summary: event.summary || current.summary } : current))
+      void refreshProvider()
       void refreshAgentHistory()
       void window.kern.agent.transcript({ missionId: event.missionId }).then((result) => {
-        if (result.ok) {
+        if (result.ok && shownMission.current === event.missionId) {
           applyTranscript(result.data)
         }
       })
@@ -196,7 +262,7 @@ export function App() {
     })
     void refreshAgentHistory()
     return () => window.kern.agent.offEvent(id)
-  }, [applyTranscript, refreshAgentHistory])
+  }, [applyTranscript, refreshAgentHistory, refreshProvider])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -380,6 +446,7 @@ export function App() {
     }
     setError('')
     await refreshSecret()
+    await refreshProvider()
   }
 
   async function clearSecret(): Promise<void> {
@@ -390,6 +457,25 @@ export function App() {
     }
     setSecretDraft('')
     await refreshSecret()
+    await refreshProvider()
+  }
+
+  async function chooseProvider(provider: ProviderId): Promise<void> {
+    const result = await window.kern.provider.set({ provider })
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    applyProvider(result.data)
+  }
+
+  async function checkProvider(): Promise<void> {
+    const result = await window.kern.provider.check()
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    applyProvider(result.data)
   }
 
   async function createFile(): Promise<void> {
@@ -411,14 +497,22 @@ export function App() {
   }
 
   async function submitMission(prompt: string): Promise<void> {
-    setAgentText('')
-    setAgentTools([])
-    setAgentNotice('')
+    pendingPrompt.current = prompt
+    armNextMission.current = true
+    streamStarted.current = false
     const result = await window.kern.agent.submit({ prompt })
     if (!result.ok) {
+      armNextMission.current = false
       setError(result.error)
       setAgentNotice(result.error)
       return
+    }
+    shownMission.current = result.data.missionId
+    armNextMission.current = false
+    if (!streamStarted.current) {
+      setConversation([{ key: 'user', role: 'user', content: prompt, streaming: false }])
+      setAgentTools([])
+      setAgentNotice('')
     }
     setAgentMission((current) =>
       current && current.id === result.data.missionId
@@ -466,7 +560,9 @@ export function App() {
   }
 
   const agentRunning = Boolean(agentMission && !terminalStatuses.has(agentMission.status))
-  const providerState = !secretAvailable || !secretConfigured ? 'disconnected' : agentRunning ? 'running' : 'ready'
+  const providerName = providerChoice === 'cursor' ? 'Cursor' : 'BharatCode'
+  const providerBadge = connectionLabel(connection, agentRunning)
+  const providerReady = connection !== 'not_configured'
   const errorCount = diagnostics.filter((item) => item.severity === 'error').length
   const warningCount = diagnostics.filter((item) => item.severity === 'warning').length
 
@@ -481,7 +577,9 @@ export function App() {
         secretStatus={secretLabel(secretAvailable, secretConfigured)}
         secretAvailable={secretAvailable}
         secretConfigured={secretConfigured}
-        providerState={providerState}
+        providerName={providerName}
+        providerLabel={providerBadge}
+        providerState={agentRunning ? 'running' : connection}
         missionTitle={agentRunning && agentMission ? agentMission.title : 'No active mission'}
         missionLive={agentRunning}
         onQuery={(value) => {
@@ -559,12 +657,12 @@ export function App() {
         {rightOpen ? (
           <AgentPanel
             changes={changes}
-            sessions={sessions}
-            providerReady={secretAvailable && secretConfigured}
+            providerReady={providerReady}
+            providerDetail={connection === 'verified' ? '' : providerDetail}
             workspaceOpen={Boolean(workspace)}
             mission={agentMission}
             running={agentRunning}
-            text={agentText}
+            messages={conversation}
             tools={agentTools}
             history={agentHistory}
             notice={agentNotice}
@@ -596,7 +694,7 @@ export function App() {
         </div>
         <div className="status-group">
           <span className="footer-link">
-            {providerState === 'running' ? 'BharatCode running' : providerState === 'ready' ? 'BharatCode ready' : 'Provider disconnected'}
+            {providerName} {providerBadge}{tokenNote ? ` · ${tokenNote}` : ''}
           </span>
           <span>
             Ln {cursor.line}, Col {cursor.column}
@@ -608,10 +706,15 @@ export function App() {
       </footer>
       <SettingsDialog
         open={settingsOpen}
+        provider={providerChoice}
+        connectionState={connection}
+        detail={providerDetail}
         secretDraft={secretDraft}
+        onProvider={(provider) => void chooseProvider(provider)}
         onDraft={setSecretDraft}
         onSave={() => void saveSecret()}
         onClear={() => void clearSecret()}
+        onCheck={() => void checkProvider()}
         onClose={() => setSettingsOpen(false)}
       />
     </div>

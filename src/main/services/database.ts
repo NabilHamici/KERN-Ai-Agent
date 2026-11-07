@@ -375,23 +375,24 @@ export class MissionDatabase {
       return null
     }
     const messages = this.db
-      .prepare('SELECT role, content FROM agent_messages WHERE mission_id = ? ORDER BY created_at ASC')
-      .all(id) as Array<{ role: string; content: string }>
+      .prepare('SELECT role, content, created_at FROM agent_messages WHERE mission_id = ? ORDER BY created_at ASC')
+      .all(id) as Array<{ role: string; content: string; created_at: string }>
     const tools = this.db
       .prepare(
-        `SELECT call_id, name, arguments, status, output
+        `SELECT call_id, name, arguments, status, output, created_at
          FROM agent_tool_calls WHERE mission_id = ? ORDER BY created_at ASC`
       )
-      .all(id) as Array<{ call_id: string; name: string; arguments: string; status: string; output: string }>
+      .all(id) as Array<{ call_id: string; name: string; arguments: string; status: string; output: string; created_at: string }>
     return {
       mission,
-      messages,
+      messages: messages.map((row) => ({ role: row.role, content: row.content, createdAt: row.created_at })),
       tools: tools.map((row) => ({
         callId: row.call_id,
         name: row.name,
         argumentsText: row.arguments,
         state: row.status === 'rejected' ? 'rejected' : 'finished',
-        output: row.output
+        output: row.output,
+        createdAt: row.created_at
       }))
     }
   }

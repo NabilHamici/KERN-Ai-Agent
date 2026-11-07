@@ -1,6 +1,7 @@
 import type { editor } from 'monaco-editor'
 
 import type { AgentEvent, AgentMissionSummary, AgentTranscript } from '../../shared/agent'
+import type { ConnectionState, ProviderId } from '../../shared/provider'
 
 type KernResult<T> = { ok: true; data: T } | { ok: false; error: string }
 
@@ -20,6 +21,31 @@ type KernBridge = {
     status: () => Promise<KernResult<{ configured: boolean; storageAvailable: boolean }>>
     set: (payload: unknown) => Promise<KernResult<{ stored: true }>>
     clear: () => Promise<KernResult<{ cleared: true }>>
+    setCursor: (payload: unknown) => Promise<KernResult<{ stored: true }>>
+    clearCursor: () => Promise<KernResult<{ cleared: true }>>
+  }
+  provider: {
+    get: () => Promise<KernResult<{
+      provider: ProviderId
+      state: ConnectionState
+      bharatCodeConfigured: boolean
+      cursorConfigured: boolean
+      detail: string
+    }>>
+    set: (payload: unknown) => Promise<KernResult<{
+      provider: ProviderId
+      state: ConnectionState
+      bharatCodeConfigured: boolean
+      cursorConfigured: boolean
+      detail: string
+    }>>
+    check: () => Promise<KernResult<{
+      provider: ProviderId
+      state: ConnectionState
+      bharatCodeConfigured: boolean
+      cursorConfigured: boolean
+      detail: string
+    }>>
   }
   terminal: {
     start: () => Promise<KernResult<{ shell: string }>>

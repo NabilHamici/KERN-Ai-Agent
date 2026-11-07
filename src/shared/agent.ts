@@ -113,7 +113,14 @@ export const agentEventSchema = z.discriminatedUnion('type', [
     type: z.literal('finished'),
     missionId: z.string().min(1).max(80),
     status: z.enum(MISSION_STATUSES),
-    summary: z.string().max(4_000)
+    summary: z.string().max(4_000),
+    usage: z
+      .strictObject({
+        inputTokens: z.number().int().nonnegative(),
+        outputTokens: z.number().int().nonnegative(),
+        totalTokens: z.number().int().nonnegative()
+      })
+      .optional()
   })
 ])
 
@@ -150,10 +157,11 @@ export type AgentToolRecord = {
   argumentsText: string
   state: 'started' | 'finished' | 'rejected'
   output: string
+  createdAt?: string
 }
 
 export type AgentTranscript = {
   mission: AgentMissionSummary
-  messages: Array<{ role: string; content: string }>
+  messages: Array<{ role: string; content: string; createdAt?: string }>
   tools: AgentToolRecord[]
 }

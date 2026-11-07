@@ -1,6 +1,15 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { AgentMissionSummary, AgentToolRecord } from '../../../shared/agent'
-import type { SessionRecord } from '../editorState'
+import {
+  canCancel,
+  canSend,
+  composeOnEnter,
+  inlineParts,
+  messageBlocks,
+  shouldFollowTranscript,
+  showResponseIndicator,
+  type ConversationEntry
+} from '../conversation'
 import { Icon } from './Icons'
 
 type FileChange = {
@@ -12,12 +21,12 @@ type FileChange = {
 
 type AgentPanelProps = {
   changes: FileChange[]
-  sessions: SessionRecord[]
   providerReady: boolean
+  providerDetail: string
   workspaceOpen: boolean
   mission: AgentMissionSummary | null
   running: boolean
-  text: string
+  messages: ConversationEntry[]
   tools: AgentToolRecord[]
   history: AgentMissionSummary[]
   notice: string
@@ -27,16 +36,14 @@ type AgentPanelProps = {
   onClose: () => void
 }
 
-const ACTIVE = new Set(['queued', 'analyzing', 'planning', 'awaiting_approval', 'executing', 'verifying'])
-
 export function AgentPanel({
   changes,
-  sessions,
   providerReady,
+  providerDetail,
   workspaceOpen,
   mission,
   running,
-  text,
+  messages,
   tools,
   history,
   notice,
@@ -46,9 +53,34 @@ export function AgentPanel({
   onClose
 }: AgentPanelProps) {
   const [draft, setDraft] = useState('')
+  const scroller = useRef<HTMLDivElement>(null)
+  const follow = useRef(true)
   const activeTool = [...tools].reverse().find((tool) => tool.state === 'started') ?? tools[tools.length - 1]
   const reads = tools.filter((tool) => tool.state === 'finished' && tool.name === 'read_file').map((tool) => tool.argumentsText)
   const statusLabel = mission ? mission.status.replaceAll('_', ' ') : 'Not running'
+  const responding = showResponseIndicator(running, messages)
+  const sendEnabled = canSend(draft, running, workspaceOpen)
+
+  useEffect(() => {
+    follow.current = true
+  }, [mission?.id])
+
+  useEffect(() => {
+    const node = scroller.current
+    if (!node || !follow.current) {
+      return
+    }
+    node.scrollTop = node.scrollHeight
+  }, [messages, responding, mission?.id])
+
+  function submitDraft(): void {
+    const prompt = draft.trim()
+    if (!canSend(prompt, running, workspaceOpen)) {
+      return
+    }
+    setDraft('')
+    onSubmit(prompt)
+  }
 
   return (
     <aside className="agent">
@@ -71,8 +103,6 @@ export function AgentPanel({
             <span>{statusLabel}</span>
           </div>
           <p className="mission-copy">{mission?.prompt ?? 'No mission is in progress.'}</p>
-          {text ? <p className="agent-text">{text}</p> : null}
-          {mission?.summary ? <p className="agent-text">{mission.summary}</p> : null}
           {notice ? <p className="hint">{notice}</p> : null}
           <div className="progress" title="Progress is not estimated. The status above is the persisted mission state.">
             <i />
@@ -128,26 +158,49 @@ export function AgentPanel({
             </div>
           ))}
         </section>
-        <section>
-          <h2>Workspace sessions</h2>
-          <p className="hint">These are saved workspace sessions, not live agent missions.</p>
-          {sessions.length === 0 ? <p className="muted">No recorded sessions.</p> : null}
-          {sessions.map((session) => (
-            <div key={session.id} className="change-row">
-              <span>{session.status}</span>
-              <span>{session.title}</span>
-              <span className="muted">{session.createdAt}</span>
-            </div>
-          ))}
-        </section>
+      </div>
+      <div
+        className="conversation"
+        data-conversation
+        ref={scroller}
+        onScroll={() => {
+          const node = scroller.current
+          if (!node) {
+            return
+          }
+          follow.current = shouldFollowTranscript(node.scrollTop, node.scrollHeight, node.clientHeight)
+        }}
+      >
+        {messages.length === 0 ? <p className="muted">No conversation yet.</p> : null}
+        {messages.map((entry) => (
+          <article key={entry.key} className={`thread-line is-${entry.role}`} data-message-role={entry.role}>
+            <span className="thread-role">{entry.role === 'user' ? 'You' : entry.role === 'tool' ? 'Tool' : 'KERN'}</span>
+            {entry.role === 'tool' ? <p className="thread-copy">{entry.content}</p> : <MessageBody text={entry.content} />}
+          </article>
+        ))}
+        {responding ? (
+          <p className="thread-wait" data-streaming="true">
+            Responding
+          </p>
+        ) : null}
       </div>
       <div className="agent-compose">
-        {!providerReady ? <p className="hint">Store a BharatCode API key in Settings before sending a mission.</p> : null}
+        {providerDetail ? <p className="hint">{providerDetail}</p> : null}
         {!workspaceOpen ? <p className="hint">Open a folder before sending a mission.</p> : null}
         <div className="compose-box">
           <textarea
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter' || event.nativeEvent.isComposing) {
+                return
+              }
+              if (composeOnEnter(event.shiftKey) === 'newline') {
+                return
+              }
+              event.preventDefault()
+              submitDraft()
+            }}
             rows={3}
             placeholder="Tell KERN what to inspect in this workspace."
             spellCheck={false}
@@ -156,16 +209,10 @@ export function AgentPanel({
           <button
             type="button"
             className="send-button"
-            disabled={!workspaceOpen || running || !draft.trim()}
+            data-action="agent-send"
+            disabled={!sendEnabled}
             title={providerReady ? 'Send mission' : 'Store a BharatCode API key in Settings.'}
-            onClick={() => {
-              const prompt = draft.trim()
-              if (!prompt) {
-                return
-              }
-              setDraft('')
-              onSubmit(prompt)
-            }}
+            onClick={submitDraft}
           >
             <Icon name="send" />
           </button>
@@ -178,7 +225,7 @@ export function AgentPanel({
             <button type="button" className="text-button" disabled title="Pause is not available.">
               Pause
             </button>
-            <button type="button" className="text-button" data-action="agent-cancel" onClick={onCancel} disabled={!running || !mission || !ACTIVE.has(mission.status)}>
+            <button type="button" className="text-button" data-action="agent-cancel" onClick={onCancel} disabled={!canCancel(running, mission?.status ?? null)}>
               Cancel
             </button>
           </div>
@@ -186,5 +233,25 @@ export function AgentPanel({
         </div>
       </div>
     </aside>
+  )
+}
+
+function MessageBody({ text }: { text: string }) {
+  return (
+    <div className="thread-body">
+      {messageBlocks(text).map((block, index) =>
+        block.kind === 'code' ? (
+          <pre key={index} className="thread-code">
+            {block.text}
+          </pre>
+        ) : (
+          <p key={index} className="thread-copy">
+            {inlineParts(block.text).map((part, partIndex) =>
+              part.code ? <code key={partIndex}>{part.text}</code> : <span key={partIndex}>{part.text}</span>
+            )}
+          </p>
+        )
+      )}
+    </div>
   )
 }

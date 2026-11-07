@@ -15,6 +15,7 @@ test('rejects invalid IPC payloads without echoing the API key', () => {
     [IpcChannel.secretsSet, { apiKey: `${secret}\n` }],
     [IpcChannel.terminalWrite, { data: 'x'.repeat(70_000) }],
     [IpcChannel.agentSubmit, { prompt: 'inspect', extra: secret }],
+    [IpcChannel.providerSet, { provider: 'cursor', extra: secret }],
     [IpcChannel.agentCancel, { missionId: 'not-a-uuid' }],
     ['shell:exec', { command: 'rm -rf /' }]
   ] as const

@@ -5,7 +5,7 @@ import {
   type MissionStatus
 } from '../../shared/agent.ts'
 import { MODEL_TOOLS, parseCompletion, type ToolExecution } from './tools.ts'
-import type { FunctionCall, ProviderTurn } from './provider.ts'
+import { addUsage, type FunctionCall, type ProviderTurn, type TokenUsageReport } from './provider.ts'
 
 export type ModelClient = (input: {
   instructions: string
@@ -19,6 +19,7 @@ export type LoopResult = {
   status: MissionStatus
   summary: string | null
   error: string | null
+  usage?: TokenUsageReport
 }
 
 function abortError(): Error {
@@ -62,6 +63,13 @@ export async function runAgentLoop(options: {
   move('analyzing')
   let input: unknown[] = [userItem(options.prompt)]
   let toolCalls = 0
+  let usage: TokenUsageReport | undefined
+  const outcome = (next: MissionStatus, summary: string | null, error: string | null): LoopResult => ({
+    status: next,
+    summary,
+    error,
+    usage
+  })
   for (let iteration = 0; iteration < AGENT_LIMITS.maxIterations; iteration += 1) {
     if (options.signal.aborted) {
       throw abortError()
@@ -69,7 +77,7 @@ export async function runAgentLoop(options: {
     const requestSignal = AbortSignal.any([options.signal, AbortSignal.timeout(AGENT_LIMITS.requestTimeoutMs)])
     if (JSON.stringify(input).length + instructions.length > AGENT_LIMITS.maxContextChars) {
       move('failed')
-      return { status: 'failed', summary: null, error: 'Mission context limit reached' }
+      return outcome('failed', null, 'Mission context limit reached')
     }
     let turn: ProviderTurn
     try {
@@ -86,10 +94,10 @@ export async function runAgentLoop(options: {
       }
       if (error instanceof Error && error.name === 'AbortError') {
         move('failed')
-        return { status: 'failed', summary: null, error: 'The model request timed out.' }
+        return outcome('failed', null, 'The model request timed out.')
       }
       move('failed')
-      return { status: 'failed', summary: null, error: 'The model provider could not be reached.' }
+      return outcome('failed', null, 'The model provider could not be reached.')
     }
     if (options.signal.aborted) {
       throw abortError()
@@ -97,12 +105,13 @@ export async function runAgentLoop(options: {
     if (turn.kind === 'incomplete') {
       move('failed')
       const reason = turn.reason === 'max_output_tokens' ? 'The model output budget was exhausted.' : 'The model response was incomplete.'
-      return { status: 'failed', summary: redactSensitive(turn.text, options.secret), error: reason }
+      return outcome('failed', redactSensitive(turn.text, options.secret), reason)
     }
     if (turn.kind === 'failed') {
       move('failed')
-      return { status: 'failed', summary: null, error: redactSensitive(turn.message, options.secret) }
+      return outcome('failed', null, redactSensitive(turn.message, options.secret))
     }
+    usage = addUsage(usage, turn.usage)
     const reads = turn.calls.filter((call) => call.name !== 'submit_result')
     const finish = turn.calls.find((call) => call.name === 'submit_result')
     if (reads.length === 0 && finish) {
@@ -116,11 +125,11 @@ export async function runAgentLoop(options: {
         continue
       }
       move(completion.outcome === 'completed' ? 'completed' : 'failed')
-      return {
-        status: completion.outcome === 'completed' ? 'completed' : 'failed',
-        summary: completion.summary,
-        error: completion.outcome === 'blocked' ? completion.summary : null
-      }
+      return outcome(
+        completion.outcome === 'completed' ? 'completed' : 'failed',
+        completion.summary,
+        completion.outcome === 'blocked' ? completion.summary : null
+      )
     }
     if (reads.length === 0) {
       input = [
@@ -139,7 +148,7 @@ export async function runAgentLoop(options: {
       toolCalls += 1
       if (toolCalls > AGENT_LIMITS.maxToolCalls) {
         move('failed')
-        return { status: 'failed', summary: null, error: 'Mission tool-call limit reached' }
+        return outcome('failed', null, 'Mission tool-call limit reached')
       }
       if (call.name === 'submit_result') {
         const deferred: ToolExecution = {
@@ -158,5 +167,5 @@ export async function runAgentLoop(options: {
     move('analyzing')
   }
   move('failed')
-  return { status: 'failed', summary: null, error: 'Mission iteration limit reached' }
+  return outcome('failed', null, 'Mission iteration limit reached')
 }

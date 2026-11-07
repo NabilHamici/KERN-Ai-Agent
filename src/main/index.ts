@@ -1,6 +1,9 @@
 import { app, BrowserWindow, session } from 'electron'
 import path from 'node:path'
 import { registerIpc } from './ipc.ts'
+import { createProductionClient } from './agent/client.ts'
+import { createCursorSdkBridge, cursorUsesStoredLogin } from './agent/cursorSdk.ts'
+import { readProviderId } from './agent/providerSettings.ts'
 import { AgentRuntime } from './agent/runtime.ts'
 import { IpcChannel } from '../shared/ipc.ts'
 import { MissionDatabase } from './services/database.ts'
@@ -110,13 +113,23 @@ async function createWindow(): Promise<void> {
 void app.whenReady().then(async () => {
   installSessionGuards()
   const dbPath = path.join(app.getPath('userData'), 'kern.sqlite')
-  database = new MissionDatabase(dbPath)
-  const workspace = new WorkspaceService(database)
+  const db = new MissionDatabase(dbPath)
+  database = db
+  const workspace = new WorkspaceService(db)
   terminal = new TerminalService()
+  const userData = app.getPath('userData')
   const runtime = new AgentRuntime({
-    database,
+    database: db,
     currentWorkspace: () => workspace.current(),
-    readApiKey: () => readSecret(app.getPath('userData')),
+    readApiKey: () => readSecret(userData),
+    cursorReady: () => cursorUsesStoredLogin(),
+    readProvider: () => readProviderId(db),
+    client: createProductionClient({
+      database: db,
+      readProvider: () => readProviderId(db),
+      readKey: (provider) => (provider === 'cursor' ? Promise.resolve(null) : readSecret(userData)),
+      cursor: createCursorSdkBridge(path.join(userData, 'cursor-runtime'))
+    }),
     emit: (event) => {
       mainWindow?.webContents.send(IpcChannel.agentEvent, event)
     }
@@ -132,6 +145,7 @@ void app.whenReady().then(async () => {
     workspace,
     terminal,
     agent: runtime,
+    database: db,
     userData: app.getPath('userData')
   })
   await createWindow()

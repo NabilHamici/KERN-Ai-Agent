@@ -1,4 +1,5 @@
 import { AGENT_LIMITS, redactSensitive } from '../../shared/agent.ts'
+import type { ConnectionState } from '../../shared/provider.ts'
 
 export const BHARATCODE_BASE_URL = 'https://bharatcode.ai/api/model/v1'
 export const BHARATCODE_MODEL = 'qwen-3.8-27b'
@@ -9,10 +10,32 @@ export type FunctionCall = {
   arguments: string
 }
 
+export type TokenUsageReport = {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+}
+
+export type ProviderFailureCode = 'authentication' | 'usage' | 'unavailable' | 'unsupported' | 'malformed'
+
 export type ProviderTurn =
-  | { kind: 'completed'; output: unknown[]; calls: FunctionCall[]; text: string; requestId: string | null }
+  | { kind: 'completed'; output: unknown[]; calls: FunctionCall[]; text: string; requestId: string | null; usage?: TokenUsageReport }
   | { kind: 'incomplete'; reason: string; text: string; requestId: string | null }
-  | { kind: 'failed'; message: string; requestId: string | null }
+  | { kind: 'failed'; message: string; requestId: string | null; code?: ProviderFailureCode }
+
+export function addUsage(current: TokenUsageReport | undefined, next: TokenUsageReport | undefined): TokenUsageReport | undefined {
+  if (!next) {
+    return current
+  }
+  if (!current) {
+    return next
+  }
+  return {
+    inputTokens: current.inputTokens + next.inputTokens,
+    outputTokens: current.outputTokens + next.outputTokens,
+    totalTokens: current.totalTokens + next.totalTokens
+  }
+}
 
 export type SseEvent = { event: string; data: string }
 
@@ -240,11 +263,30 @@ export async function requestBharatCode(options: {
       if (options.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
         throw abortError()
       }
-      return { kind: 'failed', message: 'The model provider could not be reached.', requestId: null }
+      return { kind: 'failed', code: 'unavailable', message: 'The model provider could not be reached.', requestId: null }
     }
     const requestId = requestIdOf(response)
     if (response.status === 401) {
-      return { kind: 'failed', message: `BharatCode rejected the API key.${requestId ? ` Request ${requestId}.` : ''}`, requestId }
+      return {
+        kind: 'failed',
+        code: 'authentication',
+        message: `BharatCode rejected the API key.${requestId ? ` Request ${requestId}.` : ''}`,
+        requestId
+      }
+    }
+    if (response.status === 402) {
+      let payload: unknown = null
+      try {
+        payload = await response.json()
+      } catch {
+        payload = null
+      }
+      return {
+        kind: 'failed',
+        code: 'usage',
+        message: failureMessage(payload, 'BharatCode rejected the request because the account cannot use the API.', options.apiKey),
+        requestId
+      }
     }
     if (response.status === 429 && rateAttempts < 1) {
       rateAttempts += 1
@@ -261,10 +303,10 @@ export async function requestBharatCode(options: {
       continue
     }
     if (response.status === 429) {
-      return { kind: 'failed', message: `BharatCode rate limit.${requestId ? ` Request ${requestId}.` : ''}`, requestId }
+      return { kind: 'failed', code: 'usage', message: `BharatCode rate limit.${requestId ? ` Request ${requestId}.` : ''}`, requestId }
     }
     if (response.status === 503) {
-      return { kind: 'failed', message: `BharatCode is busy.${requestId ? ` Request ${requestId}.` : ''}`, requestId }
+      return { kind: 'failed', code: 'unavailable', message: `BharatCode is busy.${requestId ? ` Request ${requestId}.` : ''}`, requestId }
     }
     if (!response.ok) {
       let payload: unknown = null
@@ -290,5 +332,36 @@ export async function requestBharatCode(options: {
       return turnFromResponse(payload, '', requestId, options.apiKey)
     }
     return readStream(response, options.apiKey, options.onDelta)
+  }
+}
+
+export async function probeBharatCode(apiKey: string, fetchImpl: FetchLike = fetch): Promise<ConnectionState> {
+  try {
+    const response = await fetchImpl(`${BHARATCODE_BASE_URL}/responses`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json'
+      },
+      body: JSON.stringify({
+        model: BHARATCODE_MODEL,
+        store: false,
+        stream: false,
+        max_output_tokens: 16,
+        reasoning: { effort: 'none' },
+        input: [{ role: 'user', content: 'Reply with the single word pong.' }]
+      })
+    })
+    await response.body?.cancel().catch(() => undefined)
+    if (response.status === 401) {
+      return 'authentication_failed'
+    }
+    if (response.status === 402 || response.status === 429) {
+      return 'usage_restricted'
+    }
+    return response.ok ? 'verified' : 'unavailable'
+  } catch {
+    return 'unavailable'
   }
 }

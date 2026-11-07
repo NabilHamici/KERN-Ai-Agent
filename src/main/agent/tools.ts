@@ -113,7 +113,7 @@ function excluded(relativePath: string): boolean {
     return true
   }
   const base = parts[parts.length - 1] ?? ''
-  return base === '.env' || base.startsWith('.env.') || base === 'api-key.bin' || base.endsWith('.sqlite')
+  return base === '.env' || base.startsWith('.env.') || base === 'api-key.bin' || base === 'cursor-api-key.bin' || base.endsWith('.sqlite')
 }
 
 function parseArguments(argumentsText: string): { ok: true; value: unknown } | { ok: false } {

@@ -7,6 +7,7 @@ import {
   type AgentTranscript,
   type MissionStatus
 } from '../../shared/agent.ts'
+import type { ProviderId } from '../../shared/provider.ts'
 import type { MissionDatabase } from '../services/database.ts'
 import { runAgentLoop, type ModelClient } from './loop.ts'
 import { requestBharatCode, type ProviderTurn } from './provider.ts'
@@ -23,6 +24,8 @@ export class AgentRuntime {
   private readonly database: MissionDatabase
   private readonly currentWorkspace: () => WorkspaceSnapshot | null
   private readonly readApiKey: () => Promise<string | null>
+  private readonly cursorReady: () => Promise<boolean>
+  private readonly readProvider: () => ProviderId
   private readonly emit: (event: AgentEvent) => void
   private readonly client: ModelClient
 
@@ -30,12 +33,16 @@ export class AgentRuntime {
     database: MissionDatabase
     currentWorkspace: () => WorkspaceSnapshot | null
     readApiKey: () => Promise<string | null>
+    cursorReady?: () => Promise<boolean>
+    readProvider?: () => ProviderId
     emit: (event: AgentEvent) => void
     client?: ModelClient
   }) {
     this.database = options.database
     this.currentWorkspace = options.currentWorkspace
     this.readApiKey = options.readApiKey
+    this.cursorReady = options.cursorReady ?? (async () => false)
+    this.readProvider = options.readProvider ?? (() => 'bharatcode')
     this.emit = options.emit
     this.client =
       options.client ??
@@ -66,8 +73,15 @@ export class AgentRuntime {
     }
     this.busy = true
     try {
-      const key = await this.readApiKey()
-      if (!key) {
+      const provider = this.readProvider()
+      const key = provider === 'cursor' ? '' : await this.readApiKey()
+      if (provider === 'cursor') {
+        const envKey = process.env.CURSOR_API_KEY?.trim()
+        if (!envKey && !(await this.cursorReady())) {
+          this.busy = false
+          throw new AgentError('Cursor is not signed in on this Mac.')
+        }
+      } else if (!key) {
         this.busy = false
         throw new AgentError('No BharatCode API key is stored')
       }
@@ -75,7 +89,7 @@ export class AgentRuntime {
       const controller = new AbortController()
       this.controllers.set(mission.id, controller)
       this.publish({ type: 'status', missionId: mission.id, status: 'queued', title: mission.title })
-      this.tail = this.execute(mission.id, workspace, key, controller)
+      this.tail = this.execute(mission.id, workspace, key ?? '', controller)
       return { missionId: mission.id }
     } catch (error) {
       this.busy = false
@@ -166,7 +180,8 @@ export class AgentRuntime {
         type: 'finished',
         missionId,
         status: finalStatus,
-        summary: redactSensitive(result.summary ?? result.error ?? '', secret)
+        summary: redactSensitive(result.summary ?? result.error ?? '', secret),
+        ...(result.usage ? { usage: result.usage } : {})
       })
     } catch (error) {
       flushText()

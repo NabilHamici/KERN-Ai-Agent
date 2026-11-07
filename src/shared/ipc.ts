@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { agentCancelSchema, agentEventSchema, agentSubmitSchema } from './agent.ts'
+import { providerSetSchema } from './provider.ts'
 
 const invalid = { error: 'Invalid request' } as const
 
@@ -86,6 +87,11 @@ export const IpcChannel = {
   secretsStatus: 'secrets:status',
   secretsSet: 'secrets:set',
   secretsClear: 'secrets:clear',
+  secretsSetCursor: 'secrets:setCursor',
+  secretsClearCursor: 'secrets:clearCursor',
+  providerGet: 'provider:get',
+  providerSet: 'provider:set',
+  providerCheck: 'provider:check',
   terminalStart: 'terminal:start',
   terminalWrite: 'terminal:write',
   terminalResize: 'terminal:resize',
@@ -115,6 +121,11 @@ export const requestSchemas = {
   [IpcChannel.secretsStatus]: emptyRequestSchema,
   [IpcChannel.secretsSet]: secretSetSchema,
   [IpcChannel.secretsClear]: emptyRequestSchema,
+  [IpcChannel.secretsSetCursor]: secretSetSchema,
+  [IpcChannel.secretsClearCursor]: emptyRequestSchema,
+  [IpcChannel.providerGet]: emptyRequestSchema,
+  [IpcChannel.providerSet]: providerSetSchema,
+  [IpcChannel.providerCheck]: emptyRequestSchema,
   [IpcChannel.terminalStart]: emptyRequestSchema,
   [IpcChannel.terminalWrite]: terminalWriteSchema,
   [IpcChannel.terminalResize]: terminalResizeSchema,
@@ -180,5 +191,6 @@ export type FileChangeRecord = {
 
 export type SecretStatus = {
   configured: boolean
+  cursorConfigured: boolean
   storageAvailable: boolean
 }

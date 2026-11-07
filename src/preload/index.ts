@@ -41,7 +41,14 @@ const kern = {
   secrets: {
     status: () => invoke(IpcChannel.secretsStatus, {}),
     set: (payload: unknown) => invoke(IpcChannel.secretsSet, payload),
-    clear: () => invoke(IpcChannel.secretsClear, {})
+    clear: () => invoke(IpcChannel.secretsClear, {}),
+    setCursor: (payload: unknown) => invoke(IpcChannel.secretsSetCursor, payload),
+    clearCursor: () => invoke(IpcChannel.secretsClearCursor, {})
+  },
+  provider: {
+    get: () => invoke(IpcChannel.providerGet, {}),
+    set: (payload: unknown) => invoke(IpcChannel.providerSet, payload),
+    check: () => invoke(IpcChannel.providerCheck, {})
   },
   terminal: {
     start: () => invoke(IpcChannel.terminalStart, {}),

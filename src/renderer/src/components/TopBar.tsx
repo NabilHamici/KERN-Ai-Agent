@@ -10,7 +10,9 @@ type TopBarProps = {
   secretStatus: string
   secretAvailable: boolean
   secretConfigured: boolean
-  providerState: 'disconnected' | 'ready' | 'running'
+  providerName: string
+  providerLabel: string
+  providerState: string
   missionTitle: string
   missionLive: boolean
   onQuery: (value: string) => void
@@ -27,6 +29,8 @@ export function TopBar({
   secretStatus,
   secretAvailable,
   secretConfigured,
+  providerName,
+  providerLabel,
   providerState,
   missionTitle,
   missionLive,
@@ -88,19 +92,11 @@ export function TopBar({
         <div
           className="model-badge"
           data-provider={providerState}
-          title={
-            providerState === 'running'
-              ? 'A BharatCode request is in progress.'
-              : providerState === 'ready'
-                ? 'A BharatCode API key is stored. No request is running.'
-                : 'No BharatCode API key is stored.'
-          }
+          title={providerLabel}
         >
           <Icon name="zap" className="tone-amber" />
-          <span>{providerState === 'disconnected' ? 'Provider' : 'BharatCode'}</span>
-          <span className="badge-off">
-            {providerState === 'running' ? 'Running' : providerState === 'ready' ? 'Ready' : 'Disconnected'}
-          </span>
+          <span>{providerName}</span>
+          <span className="badge-off">{providerLabel}</span>
         </div>
         <span data-secret-status className={keyClass}>
           {secretStatus}

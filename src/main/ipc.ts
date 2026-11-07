@@ -2,7 +2,12 @@ import { dialog, ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'el
 import { AgentError } from '../shared/agent.ts'
 import { PathJailError } from './security/pathJail.ts'
 import { IpcChannel, parseRequest, requestSchemas, type IpcResult, type RequestChannel } from '../shared/ipc.ts'
-import { clearSecret, secretStatus, storeSecret } from './services/secrets.ts'
+import type { ProviderId } from '../shared/provider.ts'
+import { probeBharatCode } from './agent/provider.ts'
+import { cursorUsesStoredLogin, probeCursorAccount } from './agent/cursorSdk.ts'
+import { checkSelectedProvider, providerSnapshot, rememberConnection, writeProviderId } from './agent/providerSettings.ts'
+import { clearCursorSecret, clearSecret, readCursorSecret, readSecret, secretStatus, storeCursorSecret, storeSecret } from './services/secrets.ts'
+import type { MissionDatabase } from './services/database.ts'
 import type { AgentRuntime } from './agent/runtime.ts'
 import type { WorkspaceService } from './services/workspace.ts'
 import type { TerminalService } from './services/terminal.ts'
@@ -21,7 +26,19 @@ export type IpcHost = {
   workspace: WorkspaceService
   terminal: TerminalService
   agent: AgentRuntime
+  database: MissionDatabase
   userData: string
+}
+
+async function configuredProviders(userData: string): Promise<{ bharatcode: boolean; cursor: boolean }> {
+  const status = await secretStatus(userData)
+  const loggedIn = await cursorUsesStoredLogin()
+  const envKey = Boolean(process.env.CURSOR_API_KEY?.trim())
+  return { bharatcode: status.configured, cursor: envKey || loggedIn }
+}
+
+async function currentProvider(host: IpcHost) {
+  return providerSnapshot(host.database, await configuredProviders(host.userData))
 }
 
 function publicError(error: unknown): string {
@@ -96,11 +113,37 @@ async function dispatch(channel: RequestChannel, payload: unknown, host: IpcHost
     case IpcChannel.secretsSet: {
       const { apiKey } = payload as { apiKey: string }
       await storeSecret(host.userData, apiKey)
+      rememberConnection(host.database, 'bharatcode', 'credentials_stored')
       return { stored: true as const }
     }
     case IpcChannel.secretsClear:
       await clearSecret(host.userData)
+      rememberConnection(host.database, 'bharatcode', 'not_configured')
       return { cleared: true as const }
+    case IpcChannel.secretsSetCursor: {
+      const { apiKey } = payload as { apiKey: string }
+      await storeCursorSecret(host.userData, apiKey)
+      rememberConnection(host.database, 'cursor', 'credentials_stored')
+      return { stored: true as const }
+    }
+    case IpcChannel.secretsClearCursor:
+      await clearCursorSecret(host.userData)
+      rememberConnection(host.database, 'cursor', 'not_configured')
+      return { cleared: true as const }
+    case IpcChannel.providerGet:
+      return currentProvider(host)
+    case IpcChannel.providerSet: {
+      const { provider } = payload as { provider: ProviderId }
+      writeProviderId(host.database, provider)
+      return currentProvider(host)
+    }
+    case IpcChannel.providerCheck:
+      return checkSelectedProvider({
+        database: host.database,
+        configured: await configuredProviders(host.userData),
+        readKey: (provider) => (provider === 'cursor' ? readCursorSecret(host.userData) : readSecret(host.userData)),
+        probe: (provider, apiKey) => (provider === 'cursor' ? probeCursorAccount(apiKey) : probeBharatCode(apiKey))
+      })
     case IpcChannel.terminalStart: {
       const current = host.workspace.current()
       if (!current) {
