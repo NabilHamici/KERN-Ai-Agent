@@ -90,6 +90,94 @@ test('persists a mission, records a read, and completes only from submit_result'
   db.close()
 })
 
+test('a rejected call explains the invalid argument and the next turn can recover', async () => {
+  const root = temporaryDirectory()
+  fs.writeFileSync(path.join(root, 'README.md'), 'project overview')
+  let turns = 0
+  let sawReason = false
+  const result = await runAgentLoop({
+    prompt: 'Could you read the reamde.md file?',
+    workspaceName: 'demo',
+    signal: new AbortController().signal,
+    secret,
+    client: async (input) => {
+      turns += 1
+      if (turns === 1) {
+        return {
+          kind: 'completed',
+          output: [{ type: 'function_call', call_id: 'search', name: 'search_files', arguments: '{"query":"readme","max_results":20}' }],
+          calls: [{ callId: 'search', name: 'search_files', arguments: '{"query":"readme","max_results":20}' }],
+          text: '',
+          requestId: null
+        }
+      }
+      if (turns === 2) {
+        sawReason = JSON.stringify(input.input).includes('unrecognized key max_results')
+        return {
+          kind: 'completed',
+          output: [{ type: 'function_call', call_id: 'read', name: 'read_file', arguments: '{"path":"README.md"}' }],
+          calls: [{ callId: 'read', name: 'read_file', arguments: '{"path":"README.md"}' }],
+          text: '',
+          requestId: null
+        }
+      }
+      return completion('Read README.md')
+    },
+    executeTool: (name, argumentsText, cache) => executeTool(root, 'demo', name, argumentsText, cache),
+    onStatus: () => undefined,
+    onText: () => undefined,
+    onTool: () => undefined
+  })
+  assert.equal(sawReason, true)
+  assert.equal(result.status, 'completed')
+  assert.equal(result.summary, 'Read README.md')
+})
+
+test('two reads of one file in the same turn execute the file once', async () => {
+  const root = temporaryDirectory()
+  fs.writeFileSync(path.join(root, 'README.md'), 'alpha')
+  const outputs: string[] = []
+  let turns = 0
+  await runAgentLoop({
+    prompt: 'Read the readme',
+    workspaceName: 'demo',
+    signal: new AbortController().signal,
+    secret,
+    client: async () => {
+      turns += 1
+      if (turns > 1) {
+        return completion()
+      }
+      return {
+        kind: 'completed',
+        output: [
+          { type: 'function_call', call_id: 'one', name: 'read_file', arguments: '{"path":"./README.md"}' },
+          { type: 'function_call', call_id: 'two', name: 'read_file', arguments: '{"path":"README.md"}' }
+        ],
+        calls: [
+          { callId: 'one', name: 'read_file', arguments: '{"path":"./README.md"}' },
+          { callId: 'two', name: 'read_file', arguments: '{"path":"README.md"}' }
+        ],
+        text: '',
+        requestId: null
+      }
+    },
+    executeTool: (name, argumentsText, cache) => {
+      const execution = executeTool(root, 'demo', name, argumentsText, cache)
+      outputs.push(execution.output)
+      fs.writeFileSync(path.join(root, 'README.md'), 'beta')
+      return execution
+    },
+    onStatus: () => undefined,
+    onText: () => undefined,
+    onTool: () => undefined
+  })
+  assert.match(outputs[0] ?? '', /alpha/)
+  const second = JSON.parse(outputs[1] ?? '{}') as { duplicate?: boolean }
+  assert.equal(second.duplicate, true)
+  assert.equal((outputs[1] ?? '').includes('beta'), false)
+})
+
 test('stops at the iteration limit when the model never submits a result', async () => {
   const root = temporaryDirectory()
   const db = database()

@@ -10,6 +10,7 @@ import {
   showResponseIndicator,
   type ConversationEntry
 } from '../conversation'
+import { agentActivity } from '../activity'
 import { Icon } from './Icons'
 
 type FileChange = {
@@ -28,11 +29,9 @@ type AgentPanelProps = {
   running: boolean
   messages: ConversationEntry[]
   tools: AgentToolRecord[]
-  history: AgentMissionSummary[]
   notice: string
   onSubmit: (prompt: string) => void
   onCancel: () => void
-  onSelect: (missionId: string) => void
   onClose: () => void
 }
 
@@ -45,21 +44,35 @@ export function AgentPanel({
   running,
   messages,
   tools,
-  history,
   notice,
   onSubmit,
   onCancel,
-  onSelect,
   onClose
 }: AgentPanelProps) {
   const [draft, setDraft] = useState('')
+  const [view, setView] = useState<'chat' | 'trace'>('chat')
   const scroller = useRef<HTMLDivElement>(null)
   const follow = useRef(true)
-  const activeTool = [...tools].reverse().find((tool) => tool.state === 'started') ?? tools[tools.length - 1]
-  const reads = tools.filter((tool) => tool.state === 'finished' && tool.name === 'read_file').map((tool) => tool.argumentsText)
+  const startedTool = [...tools].reverse().find((tool) => tool.state === 'started')
+  const activeTool = startedTool ?? tools[tools.length - 1]
+  const activity = agentActivity({
+    running,
+    status: mission?.status ?? null,
+    toolName: startedTool?.name ?? null,
+    toolState: startedTool?.state ?? null
+  })
+  const pins = [
+    ...new Set(
+      tools
+        .filter((tool) => tool.state === 'finished' && tool.name === 'read_file')
+        .map((tool) => pinLabel(tool.argumentsText))
+        .filter((label) => label.length > 0)
+    )
+  ]
   const statusLabel = mission ? mission.status.replaceAll('_', ' ') : 'Not running'
   const responding = showResponseIndicator(running, messages)
   const sendEnabled = canSend(draft, running, workspaceOpen)
+  const badge = running ? activity.label : mission ? statusLabel : 'Idle'
 
   useEffect(() => {
     follow.current = true
@@ -88,15 +101,44 @@ export function AgentPanel({
         <div className="agent-title">
           <span className={running ? 'idle-dot is-live' : 'idle-dot'} />
           <span>KERN AGENT</span>
-          <span className="idle-badge" data-agent-status={running ? 'running' : 'idle'}>
-            {running ? 'Running' : 'Idle'}
+          <span className="idle-badge" data-agent-status={running ? 'running' : (mission?.status ?? 'idle')} data-activity={activity.phase}>
+            {badge}
           </span>
+        </div>
+        <div className="agent-view" role="tablist" aria-label="Agent view">
+          <button type="button" role="tab" aria-pressed={view === 'chat'} onClick={() => setView('chat')}>
+            <ChatMark />
+            Chat
+          </button>
+          <button type="button" role="tab" aria-pressed={view === 'trace'} onClick={() => setView('trace')}>
+            <TraceMark />
+            Trace
+          </button>
         </div>
         <button type="button" className="icon-hit" title="Hide agent" onClick={onClose}>
           <Icon name="close" />
         </button>
       </div>
-      <div className="agent-scroll">
+      {running ? (
+        <div className="agent-live" data-agent-live data-activity={activity.phase}>
+          <span className="agent-spin" />
+          <p>
+            <strong>{activity.label}</strong>
+            <span>{liveDetail(activeTool, responding, notice)}</span>
+          </p>
+        </div>
+      ) : null}
+      <div
+        className="agent-scroll"
+        ref={scroller}
+        onScroll={() => {
+          const node = scroller.current
+          if (!node) {
+            return
+          }
+          follow.current = shouldFollowTranscript(node.scrollTop, node.scrollHeight, node.clientHeight)
+        }}
+      >
         <section className="mission-card">
           <div className="card-top">
             <span>Active mission</span>
@@ -104,47 +146,76 @@ export function AgentPanel({
           </div>
           <p className="mission-copy">{mission?.prompt ?? 'No mission is in progress.'}</p>
           {notice ? <p className="hint">{notice}</p> : null}
-          <div className="progress" title="Progress is not estimated. The status above is the persisted mission state.">
+          <div
+            className="progress"
+            data-progress={activity.progress === null ? 'unestimated' : 'reported'}
+            title="Progress is not estimated. The status above is the persisted mission state."
+          >
             <i />
           </div>
         </section>
-        <section>
-          <h2>Execution action trace</h2>
-          {tools.length === 0 ? <p className="muted">No steps recorded.</p> : null}
-          {tools.map((tool) => (
-            <div key={tool.callId} className="change-row">
-              <span>{tool.state}</span>
-              <span>{tool.name}</span>
-              <span className="muted">{tool.argumentsText}</span>
+        {view === 'chat' ? (
+          <div className="conversation" data-conversation>
+            {messages.length === 0 ? <p className="muted">No conversation yet.</p> : null}
+            {messages.map((entry) =>
+              entry.role === 'tool' ? (
+                <p key={entry.key} className="chat-tool" data-message-role="tool">
+                  {entry.content}
+                </p>
+              ) : (
+                <article key={entry.key} className="chat-row" data-message-role={entry.role}>
+                  <span className={entry.role === 'user' ? 'chat-avatar is-user' : 'chat-avatar is-kern'}>{entry.role === 'user' ? 'U' : 'K'}</span>
+                  <div className="chat-bubble">
+                    <MessageBody text={entry.content} />
+                  </div>
+                </article>
+              )
+            )}
+            {responding ? (
+              <p className="thread-wait" data-streaming="true">
+                Responding
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          <section data-agent-trace>
+            <div className="trace-head">
+              <h2>Execution action trace</h2>
+              <span className="muted">{tools.length === 0 ? 'No steps' : `${tools.length} recorded`}</span>
             </div>
-          ))}
-        </section>
-        <section className="tool-box">
-          <header>
-            <span>Active tool execution</span>
-            <span>{activeTool?.name ?? 'idle'}</span>
-          </header>
-          {activeTool ? <pre>{activeTool.output || activeTool.argumentsText}</pre> : <p className="muted">No tool is running.</p>}
-        </section>
+            {tools.length === 0 ? <p className="muted">No steps recorded.</p> : null}
+            {tools.map((tool) => (
+              <div key={tool.callId} className={tool.state === 'started' ? 'trace-step is-started' : 'trace-step'}>
+                <TraceState state={tool.state} />
+                <div>
+                  <p>
+                    <strong>{tool.name}</strong>
+                  </p>
+                  <p className="muted">{tool.state}</p>
+                  {tool.argumentsText ? <p className="muted">{tool.argumentsText}</p> : null}
+                </div>
+              </div>
+            ))}
+            <section className="tool-box">
+              <header>
+                <span>Active tool execution</span>
+                <span>{activeTool?.name ?? 'idle'}</span>
+              </header>
+              {activeTool ? <pre>{activeTool.output || activeTool.argumentsText}</pre> : <p className="muted">No tool is running.</p>}
+            </section>
+          </section>
+        )}
         <section>
-          <h2>Context memory</h2>
-          {reads.length === 0 ? <p className="muted">None</p> : null}
-          {reads.map((entry) => (
-            <p key={entry} className="change-row">
-              {entry}
-            </p>
-          ))}
-        </section>
-        <section>
-          <h2>Agent missions</h2>
-          {history.length === 0 ? <p className="muted">No agent missions yet.</p> : null}
-          {history.map((item) => (
-            <button key={item.id} type="button" className="change-row" onClick={() => onSelect(item.id)}>
-              <span>{item.status}</span>
-              <span>{item.title}</span>
-              <span className="muted">{item.createdAt}</span>
-            </button>
-          ))}
+          <h2>Context pins</h2>
+          {pins.length === 0 ? <p className="muted">None</p> : null}
+          <div className="pin-row">
+            {pins.map((pin) => (
+              <span key={pin} className="pin">
+                <Icon name="file" />
+                {pin}
+              </span>
+            ))}
+          </div>
         </section>
         <section>
           <h2>Recorded file changes</h2>
@@ -158,31 +229,6 @@ export function AgentPanel({
             </div>
           ))}
         </section>
-      </div>
-      <div
-        className="conversation"
-        data-conversation
-        ref={scroller}
-        onScroll={() => {
-          const node = scroller.current
-          if (!node) {
-            return
-          }
-          follow.current = shouldFollowTranscript(node.scrollTop, node.scrollHeight, node.clientHeight)
-        }}
-      >
-        {messages.length === 0 ? <p className="muted">No conversation yet.</p> : null}
-        {messages.map((entry) => (
-          <article key={entry.key} className={`thread-line is-${entry.role}`} data-message-role={entry.role}>
-            <span className="thread-role">{entry.role === 'user' ? 'You' : entry.role === 'tool' ? 'Tool' : 'KERN'}</span>
-            {entry.role === 'tool' ? <p className="thread-copy">{entry.content}</p> : <MessageBody text={entry.content} />}
-          </article>
-        ))}
-        {responding ? (
-          <p className="thread-wait" data-streaming="true">
-            Responding
-          </p>
-        ) : null}
       </div>
       <div className="agent-compose">
         {providerDetail ? <p className="hint">{providerDetail}</p> : null}
@@ -202,7 +248,7 @@ export function AgentPanel({
               submitDraft()
             }}
             rows={3}
-            placeholder="Tell KERN what to inspect in this workspace."
+            placeholder="Tell KERN what to build or refactor..."
             spellCheck={false}
             disabled={!workspaceOpen || running}
           />
@@ -229,11 +275,59 @@ export function AgentPanel({
               Cancel
             </button>
           </div>
-          <span>{running ? 'Running' : 'Not sent'}</span>
+          <span className="compose-hint">{running ? 'Running' : 'Shift + Enter for line'}</span>
         </div>
       </div>
     </aside>
   )
+}
+
+function liveDetail(tool: AgentToolRecord | undefined, responding: boolean, notice: string): string {
+  if (notice) {
+    return notice
+  }
+  if (tool && (tool.state === 'started' || tool.state === 'finished')) {
+    return tool.argumentsText ? `${tool.name} ${tool.argumentsText}` : tool.name
+  }
+  return responding ? 'Waiting for the model response.' : 'Mission is running.'
+}
+
+function pinLabel(argumentsText: string): string {
+  try {
+    const parsed = JSON.parse(argumentsText) as { path?: unknown }
+    if (typeof parsed.path === 'string') {
+      return parsed.path
+    }
+  } catch {
+    return argumentsText
+  }
+  return argumentsText
+}
+
+function ChatMark() {
+  return (
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+      <path d="M2.5 3.5h11v7.2H6.2L3.2 13V3.5Z" fill="none" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  )
+}
+
+function TraceMark() {
+  return (
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+      <path d="M3 4.2h10M3 8h10M3 11.8h7" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function TraceState({ state }: { state: AgentToolRecord['state'] }) {
+  if (state === 'started') {
+    return <span className="agent-spin trace-mark" />
+  }
+  if (state === 'finished') {
+    return <Icon name="check" className="trace-mark is-done" />
+  }
+  return <span className="trace-mark is-rejected" aria-hidden="true" />
 }
 
 function MessageBody({ text }: { text: string }) {

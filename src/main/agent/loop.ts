@@ -4,7 +4,7 @@ import {
   redactSensitive,
   type MissionStatus
 } from '../../shared/agent.ts'
-import { MODEL_TOOLS, parseCompletion, type ToolExecution } from './tools.ts'
+import { MODEL_TOOLS, parseCompletion, type ReadCache, type ToolExecution } from './tools.ts'
 import { addUsage, type FunctionCall, type ProviderTurn, type TokenUsageReport } from './provider.ts'
 
 export type ModelClient = (input: {
@@ -48,7 +48,7 @@ export async function runAgentLoop(options: {
   signal: AbortSignal
   secret: string
   client: ModelClient
-  executeTool: (name: string, argumentsText: string) => ToolExecution
+  executeTool: (name: string, argumentsText: string, cache?: ReadCache) => ToolExecution
   onStatus: (status: MissionStatus) => void
   onText: (delta: string) => void
   onTool: (call: FunctionCall, execution: ToolExecution) => void
@@ -141,6 +141,7 @@ export async function runAgentLoop(options: {
     }
     move('executing')
     const outputs: unknown[] = []
+    const readCache: ReadCache = { files: new Map() }
     for (const call of turn.calls) {
       if (options.signal.aborted) {
         throw abortError()
@@ -159,7 +160,7 @@ export async function runAgentLoop(options: {
         outputs.push({ type: 'function_call_output', call_id: call.callId, output: deferred.output })
         continue
       }
-      const execution = options.executeTool(call.name, call.arguments)
+      const execution = options.executeTool(call.name, call.arguments, readCache)
       options.onTool(call, { ...execution, output: redactSensitive(execution.output, options.secret) })
       outputs.push({ type: 'function_call_output', call_id: call.callId, output: redactSensitive(execution.output, options.secret) })
     }

@@ -55,7 +55,6 @@ export function App() {
   const [rightOpen, setRightOpen] = useState(true)
   const [bottomOpen, setBottomOpen] = useState(true)
   const [agentMission, setAgentMission] = useState<AgentMissionSummary | null>(null)
-  const [agentHistory, setAgentHistory] = useState<AgentMissionSummary[]>([])
   const [conversation, setConversation] = useState<ConversationEntry[]>([])
   const [agentTools, setAgentTools] = useState<AgentToolRecord[]>([])
   const [agentNotice, setAgentNotice] = useState('')
@@ -182,13 +181,6 @@ export function App() {
     setAgentNotice(transcript.mission.error ?? '')
   }, [])
 
-  const refreshAgentHistory = useCallback(async (): Promise<void> => {
-    const result = await window.kern.agent.history({ limit: 20 })
-    if (result.ok) {
-      setAgentHistory(result.data)
-    }
-  }, [])
-
   useEffect(() => {
     const accepts = (missionId: string): boolean => {
       if (armNextMission.current) {
@@ -248,7 +240,6 @@ export function App() {
       }
       setAgentMission((current) => (current && current.id === event.missionId ? { ...current, status: event.status, summary: event.summary || current.summary } : current))
       void refreshProvider()
-      void refreshAgentHistory()
       void window.kern.agent.transcript({ missionId: event.missionId }).then((result) => {
         if (result.ok && shownMission.current === event.missionId) {
           applyTranscript(result.data)
@@ -260,9 +251,8 @@ export function App() {
         applyTranscript(result.data)
       }
     })
-    void refreshAgentHistory()
     return () => window.kern.agent.offEvent(id)
-  }, [applyTranscript, refreshAgentHistory, refreshProvider])
+  }, [applyTranscript, refreshProvider])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -543,15 +533,6 @@ export function App() {
     }
   }
 
-  async function showMission(missionId: string): Promise<void> {
-    const result = await window.kern.agent.transcript({ missionId })
-    if (!result.ok) {
-      setAgentNotice(result.error)
-      return
-    }
-    applyTranscript(result.data)
-  }
-
   async function cancelTerminal(): Promise<void> {
     const result = await window.kern.terminal.cancel()
     if (!result.ok) {
@@ -664,11 +645,9 @@ export function App() {
             running={agentRunning}
             messages={conversation}
             tools={agentTools}
-            history={agentHistory}
             notice={agentNotice}
             onSubmit={(prompt) => void submitMission(prompt)}
             onCancel={() => void cancelMission()}
-            onSelect={(missionId) => void showMission(missionId)}
             onClose={() => setRightOpen(false)}
           />
         ) : null}

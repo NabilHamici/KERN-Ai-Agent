@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import { z } from 'zod'
+import { z, type ZodError } from 'zod'
 import { AGENT_LIMITS } from '../../shared/agent.ts'
 import { PathJailError, normalizeRelative, resolveInside } from '../security/pathJail.ts'
 
@@ -92,8 +92,29 @@ export type ToolExecution = {
   output: string
 }
 
+export type ReadCache = {
+  files: Map<string, string>
+}
+
 function rejected(error: string): ToolExecution {
   return { state: 'rejected', output: JSON.stringify({ ok: false, error }) }
+}
+
+function argumentError(error: ZodError): string {
+  const parts = error.issues.slice(0, 3).map((issue) => {
+    const field = issue.path.length > 0 ? issue.path.map(String).join('.') : 'arguments'
+    if (issue.code === 'unrecognized_keys' && 'keys' in issue && Array.isArray(issue.keys)) {
+      return `${field}: unrecognized key ${issue.keys.join(', ')}. Only documented fields are accepted.`
+    }
+    if (issue.code === 'too_small' && field === 'path') {
+      return 'path: must be a non-empty relative path. Use "." for the workspace root.'
+    }
+    if (issue.code === 'too_small' && field === 'query') {
+      return 'query: must be a non-empty string.'
+    }
+    return `${field}: ${issue.message}`
+  })
+  return `Tool arguments were rejected. ${parts.join(' ')}`
 }
 
 function finished(payload: unknown): ToolExecution {
@@ -133,7 +154,13 @@ export function parseCompletion(argumentsText: string): { outcome: 'completed' |
   return result.success ? result.data : null
 }
 
-export function executeTool(root: string, workspaceName: string, name: string, argumentsText: string): ToolExecution {
+export function executeTool(
+  root: string,
+  workspaceName: string,
+  name: string,
+  argumentsText: string,
+  cache?: ReadCache
+): ToolExecution {
   if (!(READ_ONLY_TOOLS as readonly string[]).includes(name)) {
     return rejected('Tool is not available.')
   }
@@ -145,27 +172,27 @@ export function executeTool(root: string, workspaceName: string, name: string, a
     if (name === 'get_workspace_info') {
       const args = emptySchema.safeParse(parsed.value)
       if (!args.success) {
-        return rejected('Tool arguments were rejected.')
+        return rejected(argumentError(args.error))
       }
       return finished({ ok: true, name: workspaceName, open: true })
     }
     if (name === 'list_files') {
       const args = listSchema.safeParse(parsed.value)
       if (!args.success) {
-        return rejected('Tool arguments were rejected.')
+        return rejected(argumentError(args.error))
       }
       return listFiles(root, args.data.path)
     }
     if (name === 'read_file') {
       const args = readSchema.safeParse(parsed.value)
       if (!args.success) {
-        return rejected('Tool arguments were rejected.')
+        return rejected(argumentError(args.error))
       }
-      return readFile(root, args.data.path)
+      return readFile(root, args.data.path, cache)
     }
     const args = searchSchema.safeParse(parsed.value)
     if (!args.success) {
-      return rejected('Tool arguments were rejected.')
+      return rejected(argumentError(args.error))
     }
     return searchFiles(root, args.data.query)
   } catch (error) {
@@ -199,7 +226,7 @@ function listFiles(root: string, relativePath: string): ToolExecution {
   return finished({ ok: true, path: relative, entries, truncated: names.length > entries.length })
 }
 
-function readFile(root: string, relativePath: string): ToolExecution {
+function readFile(root: string, relativePath: string, cache?: ReadCache): ToolExecution {
   const relative = normalizeRelative(relativePath)
   if (excluded(relative)) {
     return rejected('That file is excluded from agent reads.')
@@ -212,12 +239,18 @@ function readFile(root: string, relativePath: string): ToolExecution {
   if (stat.size > 2_000_000) {
     return rejected('File is too large to read')
   }
+  const identity = `${stat.dev}:${stat.ino}`
+  const prior = cache?.files.get(identity)
+  if (prior) {
+    return finished({ ok: true, path: relative, duplicate: true, sameAs: prior })
+  }
   const bytes = fs.readFileSync(target)
   if (bytes.includes(0)) {
     return rejected('Binary files cannot be read')
   }
   const content = bytes.toString('utf8')
   const truncated = content.length > AGENT_LIMITS.maxToolOutputChars
+  cache?.files.set(identity, relative)
   return finished({
     ok: true,
     path: relative,
@@ -229,7 +262,7 @@ function readFile(root: string, relativePath: string): ToolExecution {
 function searchFiles(root: string, query: string): ToolExecution {
   const needle = query.trim().toLowerCase()
   if (!needle) {
-    return rejected('Tool arguments were rejected.')
+    return rejected('Tool arguments were rejected. query: must contain a non-space character.')
   }
   const matches: Array<{ path: string; line: number | null; text: string | null }> = []
   const queue = ['.']

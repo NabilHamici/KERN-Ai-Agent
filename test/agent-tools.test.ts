@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { AGENT_LIMITS } from '../src/shared/agent.ts'
-import { executeTool } from '../src/main/agent/tools.ts'
+import { executeTool, type ReadCache } from '../src/main/agent/tools.ts'
 
 function temporaryDirectory(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'kern-tools-'))
@@ -78,4 +78,56 @@ test('bounds tool output and rejects unsupported tools', () => {
   }
   assert.deepEqual(fs.readdirSync(root), before)
   assert.equal(fs.existsSync(path.join(root, 'created.txt')), false)
+})
+
+test('rejects an extra search field and an empty directory without dropping the reason', () => {
+  const root = temporaryDirectory()
+  fs.writeFileSync(path.join(root, 'README.md'), 'alpha')
+  const search = executeTool(root, 'demo', 'search_files', JSON.stringify({ query: 'readme', max_results: 20 }))
+  assert.equal(search.state, 'rejected')
+  assert.match(search.output, /unrecognized key max_results/)
+  assert.equal(search.output.includes('alpha'), false)
+
+  const listed = executeTool(root, 'demo', 'list_files', JSON.stringify({ path: '' }))
+  assert.equal(listed.state, 'rejected')
+  assert.match(listed.output, /workspace root/)
+
+  const validSearch = executeTool(root, 'demo', 'search_files', JSON.stringify({ query: 'readme' }))
+  assert.equal(validSearch.state, 'finished')
+  assert.match(validSearch.output, /README\.md/)
+  const validList = executeTool(root, 'demo', 'list_files', JSON.stringify({ path: '.' }))
+  assert.equal(validList.state, 'finished')
+  assert.match(validList.output, /README\.md/)
+})
+
+test('a second read of the same file in one turn does not read it again', () => {
+  const root = temporaryDirectory()
+  fs.writeFileSync(path.join(root, 'README.md'), 'alpha')
+  const cache: ReadCache = { files: new Map() }
+  const first = executeTool(root, 'demo', 'read_file', JSON.stringify({ path: './README.md' }), cache)
+  assert.match(first.output, /alpha/)
+  fs.writeFileSync(path.join(root, 'README.md'), 'beta')
+  const second = executeTool(root, 'demo', 'read_file', JSON.stringify({ path: 'README.md' }), cache)
+  const parsed = JSON.parse(second.output) as { duplicate?: boolean; sameAs?: string; content?: string }
+  assert.equal(parsed.duplicate, true)
+  assert.equal(parsed.sameAs, 'README.md')
+  assert.equal(parsed.content, undefined)
+  assert.equal(second.output.includes('beta'), false)
+
+  let sameInode = false
+  try {
+    sameInode = fs.statSync(path.join(root, 'readme.md')).ino === fs.statSync(path.join(root, 'README.md')).ino
+  } catch {
+    sameInode = false
+  }
+  if (sameInode) {
+    const folded = executeTool(root, 'demo', 'read_file', JSON.stringify({ path: 'readme.md' }), cache)
+    const foldedParsed = JSON.parse(folded.output) as { duplicate?: boolean; sameAs?: string }
+    assert.equal(foldedParsed.duplicate, true)
+    assert.equal(foldedParsed.sameAs, 'README.md')
+    assert.equal(folded.output.includes('beta'), false)
+  }
+
+  const other = executeTool(root, 'demo', 'read_file', JSON.stringify({ path: 'README.md' }))
+  assert.match(other.output, /beta/)
 })

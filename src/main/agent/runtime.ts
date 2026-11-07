@@ -154,7 +154,7 @@ export class AgentRuntime {
           this.database.setAgentCounters(missionId, iteration, this.database.getAgentMission(missionId)?.toolCalls ?? 0)
           return this.client(input)
         },
-        executeTool: (name, argumentsText) => executeTool(workspace.path, workspace.name, name, argumentsText),
+        executeTool: (name, argumentsText, cache) => executeTool(workspace.path, workspace.name, name, argumentsText, cache),
         onStatus: (status) => {
           flushText()
           this.finish(missionId, status, null, null, false)
