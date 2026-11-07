@@ -41,7 +41,17 @@ test('Cursor agent options disable host tools and pin Composer 2.5', () => {
   assert.equal(options.local?.enableAgentRetries, false)
   assert.ok(options.local?.fs)
   const names = Object.keys(options.local?.customTools ?? {}).sort()
-  assert.deepEqual(names, ['get_workspace_info', 'list_files', 'read_file', 'search_files', 'submit_result'])
+  assert.deepEqual(names, [
+    'create_file',
+    'delete_file',
+    'edit_file',
+    'get_workspace_info',
+    'list_files',
+    'read_file',
+    'rename_file',
+    'search_files',
+    'submit_result'
+  ])
   const { apiKey, ...rest } = options
   assert.equal(apiKey, secret)
   assert.equal(JSON.stringify(rest).includes(secret), false)
@@ -221,6 +231,11 @@ test('a Cursor tool proposal is executed only by the KERN loop', async () => {
       executed += 1
       return executeTool(root, 'demo', name, argumentsText)
     },
+    proposeMutation: () => ({
+      execution: { state: 'rejected', output: JSON.stringify({ ok: false, error: 'unused' }) },
+      operationId: null
+    }),
+    waitForApprovals: async () => [],
     onStatus: () => undefined,
     onText: () => undefined,
     onTool: () => undefined

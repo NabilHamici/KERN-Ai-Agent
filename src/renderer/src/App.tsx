@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import packageJson from '../../../package.json'
-import type { AgentEvent, AgentMissionSummary, AgentToolRecord, AgentTranscript } from '../../shared/agent'
+import type {
+  AgentEvent,
+  AgentMissionSummary,
+  AgentOperationSummary,
+  AgentToolRecord,
+  AgentTranscript
+} from '../../shared/agent'
 import {
   appendStreamDelta,
   appendToolActivity,
@@ -53,10 +59,22 @@ export function App() {
   const [query, setQuery] = useState('')
   const [leftOpen, setLeftOpen] = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
+  const [agentWidth, setAgentWidth] = useState(() => {
+    try {
+      const saved = Number(window.localStorage.getItem('kern.agentWidth'))
+      if (Number.isFinite(saved) && saved >= 300 && saved <= 720) {
+        return saved
+      }
+    } catch {
+      // ignore storage failures
+    }
+    return 380
+  })
   const [bottomOpen, setBottomOpen] = useState(true)
   const [agentMission, setAgentMission] = useState<AgentMissionSummary | null>(null)
   const [conversation, setConversation] = useState<ConversationEntry[]>([])
   const [agentTools, setAgentTools] = useState<AgentToolRecord[]>([])
+  const [agentOperations, setAgentOperations] = useState<AgentOperationSummary[]>([])
   const [agentNotice, setAgentNotice] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
   const shownMission = useRef<string | null>(null)
@@ -178,6 +196,7 @@ export function App() {
     setAgentMission(transcript.mission)
     setConversation(conversationFromTranscript(transcript))
     setAgentTools(transcript.tools)
+    setAgentOperations(transcript.operations)
     setAgentNotice(transcript.mission.error ?? '')
   }, [])
 
@@ -189,6 +208,7 @@ export function App() {
         shownMission.current = missionId
         setConversation([{ key: 'user', role: 'user', content: pendingPrompt.current, streaming: false }])
         setAgentTools([])
+        setAgentOperations([])
         setAgentNotice('')
         return true
       }
@@ -228,6 +248,34 @@ export function App() {
         setAgentTools((current) => {
           const next = current.filter((tool) => tool.callId !== event.callId)
           return [...next, { callId: event.callId, name: event.name, argumentsText: event.argumentsText, state: event.state, output: event.output ?? '' }]
+        })
+        return
+      }
+      if (event.type === 'proposal') {
+        if (!accepts(event.missionId)) {
+          return
+        }
+        setAgentOperations((current) => {
+          const next = current.filter((item) => item.id !== event.operation.id)
+          return [
+            ...next,
+            {
+              id: event.operation.id,
+              missionId: event.missionId,
+              callId: '',
+              kind: event.operation.kind,
+              path: event.operation.path,
+              toPath: event.operation.toPath,
+              explanation: event.operation.explanation,
+              status: event.operation.status,
+              unifiedDiff: event.operation.unifiedDiff,
+              destructive: event.operation.destructive,
+              error: event.operation.error,
+              contentFingerprint: event.operation.contentFingerprint,
+              createdAt: '',
+              resolvedAt: null
+            }
+          ]
         })
         return
       }
@@ -502,6 +550,7 @@ export function App() {
     if (!streamStarted.current) {
       setConversation([{ key: 'user', role: 'user', content: prompt, streaming: false }])
       setAgentTools([])
+      setAgentOperations([])
       setAgentNotice('')
     }
     setAgentMission((current) =>
@@ -528,6 +577,30 @@ export function App() {
       return
     }
     const result = await window.kern.agent.cancel({ missionId: agentMission.id })
+    if (!result.ok) {
+      setAgentNotice(result.error)
+    }
+  }
+
+  async function approveOperation(operationId: string): Promise<void> {
+    if (!agentMission) {
+      return
+    }
+    const result = await window.kern.agent.approve({ missionId: agentMission.id, operationId })
+    if (!result.ok) {
+      setAgentNotice(result.error)
+      return
+    }
+    setAgentNotice('')
+    await refreshTree()
+    await refreshHistory()
+  }
+
+  async function rejectOperation(operationId: string): Promise<void> {
+    if (!agentMission) {
+      return
+    }
+    const result = await window.kern.agent.reject({ missionId: agentMission.id, operationId })
     if (!result.ok) {
       setAgentNotice(result.error)
     }
@@ -645,9 +718,21 @@ export function App() {
             running={agentRunning}
             messages={conversation}
             tools={agentTools}
+            operations={agentOperations}
             notice={agentNotice}
+            width={agentWidth}
+            onWidthChange={(next) => {
+              setAgentWidth(next)
+              try {
+                window.localStorage.setItem('kern.agentWidth', String(next))
+              } catch {
+                // ignore storage failures
+              }
+            }}
             onSubmit={(prompt) => void submitMission(prompt)}
             onCancel={() => void cancelMission()}
+            onApprove={(operationId) => void approveOperation(operationId)}
+            onReject={(operationId) => void rejectOperation(operationId)}
             onClose={() => setRightOpen(false)}
           />
         ) : null}

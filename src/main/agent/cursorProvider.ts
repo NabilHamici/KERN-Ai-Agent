@@ -2,7 +2,17 @@ import { redactSensitive } from '../../shared/agent.ts'
 import { CURSOR_INCLUDED_MODEL } from '../../shared/provider.ts'
 import type { FunctionCall, ProviderFailureCode, ProviderTurn, TokenUsageReport } from './provider.ts'
 
-export const KERN_TOOL_NAMES = ['list_files', 'read_file', 'search_files', 'get_workspace_info', 'submit_result'] as const
+export const KERN_TOOL_NAMES = [
+  'list_files',
+  'read_file',
+  'search_files',
+  'get_workspace_info',
+  'create_file',
+  'edit_file',
+  'delete_file',
+  'rename_file',
+  'submit_result'
+] as const
 
 const ALLOWED = new Set<string>(KERN_TOOL_NAMES)
 

@@ -1,6 +1,7 @@
 import {
   AGENT_LIMITS,
   assertTransition,
+  isMutationTool,
   redactSensitive,
   type MissionStatus
 } from '../../shared/agent.ts'
@@ -30,10 +31,14 @@ function abortError(): Error {
 
 function instructionsFor(workspaceName: string): string {
   return [
-    `You are KERN, a read-only assistant for the workspace "${workspaceName}".`,
+    `You are KERN, a controlled coding assistant for the workspace "${workspaceName}".`,
     'You may list, read, and search files with the provided tools. Paths are relative to the workspace.',
-    'You cannot create, edit, delete, rename, run commands, or use Git.',
-    'Do not invent file contents. Do not claim a change was made.',
+    'To change files, call create_file, edit_file, delete_file, or rename_file. Those tools only create proposals.',
+    'Never claim a change was applied until a tool result says applied:true after user approval.',
+    'If a proposal is rejected, cancelled, or stale, do not retry the identical proposal. Propose a revised change or call submit_result.',
+    'After an approved apply, read the file again to verify the result before finishing.',
+    'You cannot run shell commands or use Git.',
+    'Do not invent file contents.',
     'Plain text does not finish the mission. Call submit_result with outcome "completed" or "blocked" and a summary when you are done.'
   ].join(' ')
 }
@@ -49,6 +54,11 @@ export async function runAgentLoop(options: {
   secret: string
   client: ModelClient
   executeTool: (name: string, argumentsText: string, cache?: ReadCache) => ToolExecution
+  proposeMutation: (call: FunctionCall) => {
+    execution: ToolExecution
+    operationId: string | null
+  }
+  waitForApprovals: (operationIds: string[]) => Promise<Array<{ callId: string; execution: ToolExecution }>>
   onStatus: (status: MissionStatus) => void
   onText: (delta: string) => void
   onTool: (call: FunctionCall, execution: ToolExecution) => void
@@ -112,9 +122,9 @@ export async function runAgentLoop(options: {
       return outcome('failed', null, redactSensitive(turn.message, options.secret))
     }
     usage = addUsage(usage, turn.usage)
-    const reads = turn.calls.filter((call) => call.name !== 'submit_result')
+    const actionable = turn.calls.filter((call) => call.name !== 'submit_result')
     const finish = turn.calls.find((call) => call.name === 'submit_result')
-    if (reads.length === 0 && finish) {
+    if (actionable.length === 0 && finish) {
       const completion = parseCompletion(finish.arguments)
       if (!completion) {
         input = [
@@ -131,17 +141,19 @@ export async function runAgentLoop(options: {
         completion.outcome === 'blocked' ? completion.summary : null
       )
     }
-    if (reads.length === 0) {
+    if (actionable.length === 0) {
       input = [
         ...input,
         ...turn.output,
-        userItem('Plain text does not finish the mission. Call submit_result or a read-only tool.')
+        userItem('Plain text does not finish the mission. Call submit_result or a workspace tool.')
       ]
       continue
     }
     move('executing')
     const outputs: unknown[] = []
     const readCache: ReadCache = { files: new Map() }
+    const pendingIds: string[] = []
+    const pendingCalls: FunctionCall[] = []
     for (const call of turn.calls) {
       if (options.signal.aborted) {
         throw abortError()
@@ -160,9 +172,40 @@ export async function runAgentLoop(options: {
         outputs.push({ type: 'function_call_output', call_id: call.callId, output: deferred.output })
         continue
       }
+      if (isMutationTool(call.name)) {
+        const proposed = options.proposeMutation(call)
+        const redacted = { ...proposed.execution, output: redactSensitive(proposed.execution.output, options.secret) }
+        options.onTool(call, redacted.state === 'rejected' ? redacted : { state: 'started', output: redacted.output })
+        if (proposed.operationId) {
+          pendingIds.push(proposed.operationId)
+          pendingCalls.push(call)
+        } else {
+          outputs.push({ type: 'function_call_output', call_id: call.callId, output: redacted.output })
+        }
+        continue
+      }
       const execution = options.executeTool(call.name, call.arguments, readCache)
       options.onTool(call, { ...execution, output: redactSensitive(execution.output, options.secret) })
       outputs.push({ type: 'function_call_output', call_id: call.callId, output: redactSensitive(execution.output, options.secret) })
+    }
+    if (pendingIds.length > 0) {
+      move('awaiting_approval')
+      const resolved = await options.waitForApprovals(pendingIds)
+      if (options.signal.aborted) {
+        throw abortError()
+      }
+      move('verifying')
+      for (const item of resolved) {
+        const call = pendingCalls.find((entry) => entry.callId === item.callId)
+        if (call) {
+          options.onTool(call, { ...item.execution, output: redactSensitive(item.execution.output, options.secret) })
+        }
+        outputs.push({
+          type: 'function_call_output',
+          call_id: item.callId,
+          output: redactSensitive(item.execution.output, options.secret)
+        })
+      }
     }
     input = [...input, ...turn.output, ...outputs]
     move('analyzing')

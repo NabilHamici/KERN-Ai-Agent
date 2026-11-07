@@ -72,6 +72,73 @@ export const MODEL_TOOLS = [
   },
   {
     type: 'function',
+    name: 'create_file',
+    description:
+      'Propose creating a new text file. This does not write until the user approves the proposal. Paths are relative. Include a short explanation.',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        content: { type: 'string' },
+        explanation: { type: 'string' }
+      },
+      required: ['path', 'content', 'explanation'],
+      additionalProperties: false
+    }
+  },
+  {
+    type: 'function',
+    name: 'edit_file',
+    description:
+      'Propose replacing the full contents of an existing text file. This does not write until the user approves. Include a short explanation.',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        content: { type: 'string' },
+        explanation: { type: 'string' }
+      },
+      required: ['path', 'content', 'explanation'],
+      additionalProperties: false
+    }
+  },
+  {
+    type: 'function',
+    name: 'delete_file',
+    description:
+      'Propose deleting a file. This is destructive and does not delete until the user approves. Include a short explanation.',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        explanation: { type: 'string' }
+      },
+      required: ['path', 'explanation'],
+      additionalProperties: false
+    }
+  },
+  {
+    type: 'function',
+    name: 'rename_file',
+    description:
+      'Propose renaming or moving a file. This is destructive and does not rename until the user approves. Include a short explanation.',
+    strict: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Current relative path.' },
+        to: { type: 'string', description: 'New relative path.' },
+        explanation: { type: 'string' }
+      },
+      required: ['path', 'to', 'explanation'],
+      additionalProperties: false
+    }
+  },
+  {
+    type: 'function',
     name: 'submit_result',
     description: 'Finish the mission. outcome completed means the answer is done. outcome blocked means the mission cannot continue. Plain text does not finish a mission.',
     strict: true,
@@ -88,7 +155,7 @@ export const MODEL_TOOLS = [
 ] as const
 
 export type ToolExecution = {
-  state: 'finished' | 'rejected'
+  state: 'started' | 'finished' | 'rejected'
   output: string
 }
 

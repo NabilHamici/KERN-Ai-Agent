@@ -21,11 +21,11 @@ export const TERMINAL_MISSION_STATUSES = ['completed', 'failed', 'cancelled', 'i
 
 const TRANSITIONS: Record<MissionStatus, readonly MissionStatus[]> = {
   queued: ['analyzing', 'cancelled', 'interrupted'],
-  analyzing: ['planning', 'executing', 'verifying', 'completed', 'failed', 'cancelled', 'interrupted'],
-  planning: ['analyzing', 'executing', 'cancelled', 'interrupted'],
-  awaiting_approval: ['executing', 'failed', 'cancelled', 'interrupted'],
-  executing: ['analyzing', 'verifying', 'failed', 'cancelled', 'interrupted'],
-  verifying: ['completed', 'failed', 'cancelled', 'interrupted'],
+  analyzing: ['planning', 'executing', 'awaiting_approval', 'verifying', 'completed', 'failed', 'cancelled', 'interrupted'],
+  planning: ['analyzing', 'executing', 'awaiting_approval', 'cancelled', 'interrupted'],
+  awaiting_approval: ['executing', 'analyzing', 'verifying', 'failed', 'cancelled', 'interrupted'],
+  executing: ['analyzing', 'awaiting_approval', 'verifying', 'failed', 'cancelled', 'interrupted'],
+  verifying: ['analyzing', 'completed', 'failed', 'cancelled', 'interrupted'],
   completed: [],
   failed: [],
   cancelled: [],
@@ -42,8 +42,50 @@ export const AGENT_LIMITS = {
   maxListEntries: 200,
   maxSearchResults: 40,
   maxStoredTextChars: 32_000,
+  maxProposalChars: 200_000,
   serviceRetries: 2
 } as const
+
+export const MUTATION_TOOLS = ['create_file', 'edit_file', 'delete_file', 'rename_file'] as const
+
+export type MutationToolName = (typeof MUTATION_TOOLS)[number]
+
+export function isMutationTool(name: string): name is MutationToolName {
+  return (MUTATION_TOOLS as readonly string[]).includes(name)
+}
+
+export const OPERATION_STATUSES = [
+  'pending',
+  'approved',
+  'rejected',
+  'applied',
+  'failed',
+  'cancelled',
+  'stale'
+] as const
+
+export type OperationStatus = (typeof OPERATION_STATUSES)[number]
+
+export const OPERATION_KINDS = ['create', 'edit', 'delete', 'rename'] as const
+
+export type OperationKind = (typeof OPERATION_KINDS)[number]
+
+export type AgentOperationSummary = {
+  id: string
+  missionId: string
+  callId: string
+  kind: OperationKind
+  path: string
+  toPath: string | null
+  explanation: string
+  status: OperationStatus
+  unifiedDiff: string
+  destructive: boolean
+  error: string | null
+  contentFingerprint: string
+  createdAt: string
+  resolvedAt: string | null
+}
 
 export function isMissionStatus(value: string): value is MissionStatus {
   return (MISSION_STATUSES as readonly string[]).includes(value)
@@ -121,21 +163,59 @@ export const agentEventSchema = z.discriminatedUnion('type', [
         totalTokens: z.number().int().nonnegative()
       })
       .optional()
+  }),
+  z.strictObject({
+    type: z.literal('proposal'),
+    missionId: z.string().min(1).max(80),
+    operation: z.strictObject({
+      id: z.string().min(36).max(36),
+      kind: z.enum(OPERATION_KINDS),
+      path: z.string().min(1).max(4096),
+      toPath: z.string().min(1).max(4096).nullable(),
+      explanation: z.string().max(500),
+      status: z.enum(OPERATION_STATUSES),
+      unifiedDiff: z.string().max(16_000),
+      destructive: z.boolean(),
+      error: z.string().max(2_000).nullable(),
+      contentFingerprint: z.string().min(1).max(128)
+    })
   })
 ])
 
 export type AgentEvent = z.infer<typeof agentEventSchema>
+
+const missionIdSchema = z
+  .string()
+  .min(36)
+  .max(36)
+  .refine((value) => /^[0-9a-f-]{36}$/i.test(value), invalid)
+
+const operationIdSchema = z
+  .string()
+  .min(36)
+  .max(36)
+  .refine((value) => /^[0-9a-f-]{36}$/i.test(value), invalid)
 
 export const agentSubmitSchema = z.strictObject({
   prompt: z.string().min(1).max(8_000)
 })
 
 export const agentCancelSchema = z.strictObject({
-  missionId: z
-    .string()
-    .min(36)
-    .max(36)
-    .refine((value) => /^[0-9a-f-]{36}$/i.test(value), invalid)
+  missionId: missionIdSchema
+})
+
+export const agentApproveSchema = z.strictObject({
+  missionId: missionIdSchema,
+  operationId: operationIdSchema
+})
+
+export const agentRejectSchema = z.strictObject({
+  missionId: missionIdSchema,
+  operationId: operationIdSchema
+})
+
+export const agentRestoreSchema = z.strictObject({
+  operationId: operationIdSchema
 })
 
 export type AgentMissionSummary = {
@@ -164,4 +244,5 @@ export type AgentTranscript = {
   mission: AgentMissionSummary
   messages: Array<{ role: string; content: string; createdAt?: string }>
   tools: AgentToolRecord[]
+  operations: AgentOperationSummary[]
 }

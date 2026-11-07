@@ -7,8 +7,11 @@ import {
   isMissionStatus,
   missionTitle,
   type AgentMissionSummary,
+  type AgentOperationSummary,
   type AgentTranscript,
-  type MissionStatus
+  type MissionStatus,
+  type OperationKind,
+  type OperationStatus
 } from '../../shared/agent.ts'
 import type { FileChangeRecord, MissionRecord } from '../../shared/ipc.ts'
 
@@ -80,6 +83,26 @@ const MIGRATIONS = [
       kind TEXT NOT NULL,
       message TEXT NOT NULL,
       created_at TEXT NOT NULL
+    )`,
+  `CREATE TABLE agent_operations (
+      id TEXT PRIMARY KEY,
+      mission_id TEXT NOT NULL,
+      call_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      path TEXT NOT NULL,
+      to_path TEXT,
+      explanation TEXT NOT NULL,
+      original_text TEXT,
+      proposed_text TEXT,
+      base_hash TEXT,
+      applied_hash TEXT,
+      content_fingerprint TEXT NOT NULL,
+      unified_diff TEXT NOT NULL,
+      status TEXT NOT NULL,
+      error TEXT,
+      file_change_id TEXT,
+      created_at TEXT NOT NULL,
+      resolved_at TEXT
     )`
 ]
 
@@ -183,23 +206,18 @@ export class MissionDatabase {
     relativePath: string
     changeType: string
     reverseText: string | null
-  }): void {
+  }): string {
+    const id = crypto.randomUUID()
     this.db
       .prepare(
         `INSERT INTO file_changes (id, mission_id, relative_path, change_type, reverse_text, created_at)
          VALUES (?, ?, ?, ?, ?, ?)`
       )
-      .run(
-        crypto.randomUUID(),
-        input.missionId,
-        input.relativePath,
-        input.changeType,
-        input.reverseText,
-        new Date().toISOString()
-      )
+      .run(id, input.missionId, input.relativePath, input.changeType, input.reverseText, new Date().toISOString())
     if (input.missionId) {
       this.addEvent(input.missionId, 'file', `${input.changeType} ${input.relativePath}`)
     }
+    return id
   }
 
   listMissions(limit = 50): MissionRecord[] {
@@ -355,18 +373,160 @@ export class MissionDatabase {
     callId: string
     name: string
     argumentsText: string
-    state: 'finished' | 'rejected'
+    state: 'started' | 'finished' | 'rejected'
     output: string
   }): void {
     const now = new Date().toISOString()
+    const existing = this.db
+      .prepare('SELECT id FROM agent_tool_calls WHERE mission_id = ? AND call_id = ? ORDER BY created_at DESC LIMIT 1')
+      .get(input.missionId, input.callId) as { id: string } | undefined
+    if (existing) {
+      this.db
+        .prepare('UPDATE agent_tool_calls SET status = ?, output = ?, arguments = ? WHERE id = ?')
+        .run(input.state, input.output, input.argumentsText, existing.id)
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO agent_tool_calls (id, mission_id, call_id, name, arguments, status, output, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(crypto.randomUUID(), input.missionId, input.callId, input.name, input.argumentsText, input.state, input.output, now)
+      this.db.prepare('UPDATE agent_missions SET tool_calls = tool_calls + 1, updated_at = ? WHERE id = ?').run(now, input.missionId)
+    }
+    this.addAgentEvent(input.missionId, 'tool', `${input.state} ${input.name}`)
+  }
+
+  createAgentOperation(input: {
+    id: string
+    missionId: string
+    callId: string
+    kind: OperationKind
+    path: string
+    toPath: string | null
+    explanation: string
+    originalText: string | null
+    proposedText: string | null
+    baseHash: string | null
+    contentFingerprint: string
+    unifiedDiff: string
+  }): AgentOperationSummary {
+    const now = new Date().toISOString()
     this.db
       .prepare(
-        `INSERT INTO agent_tool_calls (id, mission_id, call_id, name, arguments, status, output, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO agent_operations (
+           id, mission_id, call_id, kind, path, to_path, explanation,
+           original_text, proposed_text, base_hash, applied_hash, content_fingerprint,
+           unified_diff, status, error, file_change_id, created_at, resolved_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'pending', NULL, NULL, ?, NULL)`
       )
-      .run(crypto.randomUUID(), input.missionId, input.callId, input.name, input.argumentsText, input.state, input.output, now)
-    this.db.prepare('UPDATE agent_missions SET tool_calls = tool_calls + 1, updated_at = ? WHERE id = ?').run(now, input.missionId)
-    this.addAgentEvent(input.missionId, 'tool', `${input.state} ${input.name}`)
+      .run(
+        input.id,
+        input.missionId,
+        input.callId,
+        input.kind,
+        input.path,
+        input.toPath,
+        input.explanation,
+        input.originalText,
+        input.proposedText,
+        input.baseHash,
+        input.contentFingerprint,
+        input.unifiedDiff,
+        now
+      )
+    this.addAgentEvent(input.missionId, 'operation', `pending ${input.kind} ${input.path}`)
+    const created = this.getAgentOperation(input.id)
+    if (!created) {
+      throw new Error('Failed to persist agent operation')
+    }
+    return created
+  }
+
+  getAgentOperation(id: string): AgentOperationSummary | null {
+    const row = this.db.prepare('SELECT * FROM agent_operations WHERE id = ?').get(id) as AgentOperationRow | undefined
+    return row ? mapAgentOperation(row) : null
+  }
+
+  getAgentOperationRecord(id: string): AgentOperationRecord | null {
+    const row = this.db.prepare('SELECT * FROM agent_operations WHERE id = ?').get(id) as AgentOperationRow | undefined
+    return row ? mapAgentOperationRecord(row) : null
+  }
+
+  listAgentOperations(missionId: string): AgentOperationSummary[] {
+    const rows = this.db
+      .prepare('SELECT * FROM agent_operations WHERE mission_id = ? ORDER BY created_at ASC')
+      .all(missionId) as AgentOperationRow[]
+    return rows.map(mapAgentOperation)
+  }
+
+  listPendingAgentOperations(missionId: string): AgentOperationSummary[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM agent_operations WHERE mission_id = ? AND status = 'pending' ORDER BY created_at ASC`)
+      .all(missionId) as AgentOperationRow[]
+    return rows.map(mapAgentOperation)
+  }
+
+  /** Atomically claim a pending operation for approval. Returns null if not claimable. */
+  claimAgentOperation(missionId: string, operationId: string): AgentOperationRecord | null {
+    const now = new Date().toISOString()
+    const result = this.db
+      .prepare(
+        `UPDATE agent_operations
+         SET status = 'approved', resolved_at = ?
+         WHERE id = ? AND mission_id = ? AND status = 'pending'`
+      )
+      .run(now, operationId, missionId)
+    if (Number(result.changes ?? 0) !== 1) {
+      return null
+    }
+    return this.getAgentOperationRecord(operationId)
+  }
+
+  rejectAgentOperation(missionId: string, operationId: string): AgentOperationSummary | null {
+    const now = new Date().toISOString()
+    const result = this.db
+      .prepare(
+        `UPDATE agent_operations
+         SET status = 'rejected', resolved_at = ?, error = ?
+         WHERE id = ? AND mission_id = ? AND status = 'pending'`
+      )
+      .run(now, 'The user rejected this proposal.', operationId, missionId)
+    if (Number(result.changes ?? 0) !== 1) {
+      return null
+    }
+    return this.getAgentOperation(operationId)
+  }
+
+  cancelPendingAgentOperations(missionId: string): number {
+    const now = new Date().toISOString()
+    const result = this.db
+      .prepare(
+        `UPDATE agent_operations
+         SET status = 'cancelled', resolved_at = ?, error = ?
+         WHERE mission_id = ? AND status = 'pending'`
+      )
+      .run(now, 'The mission was cancelled.', missionId)
+    return Number(result.changes ?? 0)
+  }
+
+  finalizeAgentOperation(
+    operationId: string,
+    status: Extract<OperationStatus, 'applied' | 'failed' | 'stale'>,
+    patch: { error?: string | null; appliedHash?: string | null; fileChangeId?: string | null }
+  ): AgentOperationSummary | null {
+    const now = new Date().toISOString()
+    this.db
+      .prepare(
+        `UPDATE agent_operations
+         SET status = ?,
+             error = COALESCE(?, error),
+             applied_hash = COALESCE(?, applied_hash),
+             file_change_id = COALESCE(?, file_change_id),
+             resolved_at = COALESCE(resolved_at, ?)
+         WHERE id = ? AND status IN ('approved', 'pending')`
+      )
+      .run(status, patch.error ?? null, patch.appliedHash ?? null, patch.fileChangeId ?? null, now, operationId)
+    return this.getAgentOperation(operationId)
   }
 
   agentTranscript(id: string): AgentTranscript | null {
@@ -390,15 +550,25 @@ export class MissionDatabase {
         callId: row.call_id,
         name: row.name,
         argumentsText: row.arguments,
-        state: row.status === 'rejected' ? 'rejected' : 'finished',
+        state: row.status === 'rejected' ? 'rejected' : row.status === 'started' ? 'started' : 'finished',
         output: row.output,
         createdAt: row.created_at
-      }))
+      })),
+      operations: this.listAgentOperations(id)
     }
   }
 
   interruptAgentMissions(): number {
     const now = new Date().toISOString()
+    this.db
+      .prepare(
+        `UPDATE agent_operations
+         SET status = 'cancelled',
+             error = COALESCE(error, 'The mission was interrupted because KERN exited.'),
+             resolved_at = COALESCE(resolved_at, ?)
+         WHERE status = 'pending'`
+      )
+      .run(now)
     const result = this.db
       .prepare(
         `UPDATE agent_missions
@@ -443,5 +613,81 @@ function mapAgentMission(row: AgentMissionRow): AgentMissionSummary {
     error: row.error,
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  }
+}
+
+type AgentOperationRow = {
+  id: string
+  mission_id: string
+  call_id: string
+  kind: string
+  path: string
+  to_path: string | null
+  explanation: string
+  original_text: string | null
+  proposed_text: string | null
+  base_hash: string | null
+  applied_hash: string | null
+  content_fingerprint: string
+  unified_diff: string
+  status: string
+  error: string | null
+  file_change_id: string | null
+  created_at: string
+  resolved_at: string | null
+}
+
+export type AgentOperationRecord = AgentOperationSummary & {
+  originalText: string | null
+  proposedText: string | null
+  baseHash: string | null
+  appliedHash: string | null
+  fileChangeId: string | null
+}
+
+function isOperationKind(value: string): value is OperationKind {
+  return value === 'create' || value === 'edit' || value === 'delete' || value === 'rename'
+}
+
+function isOperationStatus(value: string): value is OperationStatus {
+  return (
+    value === 'pending' ||
+    value === 'approved' ||
+    value === 'rejected' ||
+    value === 'applied' ||
+    value === 'failed' ||
+    value === 'cancelled' ||
+    value === 'stale'
+  )
+}
+
+function mapAgentOperation(row: AgentOperationRow): AgentOperationSummary {
+  const kind = isOperationKind(row.kind) ? row.kind : 'edit'
+  return {
+    id: row.id,
+    missionId: row.mission_id,
+    callId: row.call_id,
+    kind,
+    path: row.path,
+    toPath: row.to_path,
+    explanation: row.explanation,
+    status: isOperationStatus(row.status) ? row.status : 'failed',
+    unifiedDiff: row.unified_diff,
+    destructive: kind === 'delete' || kind === 'rename',
+    error: row.error,
+    contentFingerprint: row.content_fingerprint,
+    createdAt: row.created_at,
+    resolvedAt: row.resolved_at
+  }
+}
+
+function mapAgentOperationRecord(row: AgentOperationRow): AgentOperationRecord {
+  return {
+    ...mapAgentOperation(row),
+    originalText: row.original_text,
+    proposedText: row.proposed_text,
+    baseHash: row.base_hash,
+    appliedHash: row.applied_hash,
+    fileChangeId: row.file_change_id
   }
 }

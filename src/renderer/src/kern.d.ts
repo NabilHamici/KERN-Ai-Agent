@@ -68,6 +68,9 @@ type KernBridge = {
   agent: {
     submit: (payload: unknown) => Promise<KernResult<{ missionId: string }>>
     cancel: (payload: unknown) => Promise<KernResult<{ cancelled: boolean }>>
+    approve: (payload: unknown) => Promise<KernResult<{ applied: boolean; duplicate: boolean; status: string }>>
+    reject: (payload: unknown) => Promise<KernResult<{ rejected: boolean }>>
+    restore: (payload: unknown) => Promise<KernResult<{ restored: true }>>
     current: () => Promise<KernResult<AgentTranscript | null>>
     history: (payload: unknown) => Promise<KernResult<AgentMissionSummary[]>>
     transcript: (payload: unknown) => Promise<KernResult<AgentTranscript | null>>

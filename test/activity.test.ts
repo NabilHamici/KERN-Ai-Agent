@@ -22,11 +22,14 @@ test('planning and verifying appear only when the mission status is that phase',
   assert.equal(agentActivity({ running: true, status: 'awaiting_approval' }).label, 'Awaiting approval')
 })
 
-test('refactoring stays unused until a write tool is registered', () => {
-  assert.equal(REFACTOR_TOOLS.size, 0)
-  const activity = agentActivity({ running: true, status: 'executing', toolName: 'read_file', toolState: 'started' })
-  assert.equal(activity.phase === 'refactoring', false)
-  assert.equal(activity.label.includes('%'), false)
+test('refactoring appears for real edit tools only', () => {
+  assert.equal(REFACTOR_TOOLS.has('edit_file'), true)
+  assert.equal(
+    agentActivity({ running: true, status: 'executing', toolName: 'edit_file', toolState: 'started' }).phase,
+    'refactoring'
+  )
+  assert.equal(agentActivity({ running: true, status: 'executing', toolName: 'read_file', toolState: 'started' }).phase, 'reading')
+  assert.equal(agentActivity({ running: true, status: 'awaiting_approval' }).label.includes('%'), false)
 })
 
 test('a finished tool does not keep the scan label while the model is working', () => {

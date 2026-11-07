@@ -187,6 +187,18 @@ async function dispatch(channel: RequestChannel, payload: unknown, host: IpcHost
       const { missionId } = payload as { missionId: string }
       return host.agent.cancel(missionId)
     }
+    case IpcChannel.agentApprove: {
+      const { missionId, operationId } = payload as { missionId: string; operationId: string }
+      return host.agent.approve(missionId, operationId)
+    }
+    case IpcChannel.agentReject: {
+      const { missionId, operationId } = payload as { missionId: string; operationId: string }
+      return host.agent.reject(missionId, operationId)
+    }
+    case IpcChannel.agentRestore: {
+      const { operationId } = payload as { operationId: string }
+      return host.agent.restore(operationId)
+    }
     case IpcChannel.agentCurrent:
       return host.agent.current()
     case IpcChannel.agentHistory: {

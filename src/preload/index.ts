@@ -103,6 +103,9 @@ const kern = {
   agent: {
     submit: (payload: unknown) => invoke(IpcChannel.agentSubmit, payload),
     cancel: (payload: unknown) => invoke(IpcChannel.agentCancel, payload),
+    approve: (payload: unknown) => invoke(IpcChannel.agentApprove, payload),
+    reject: (payload: unknown) => invoke(IpcChannel.agentReject, payload),
+    restore: (payload: unknown) => invoke(IpcChannel.agentRestore, payload),
     current: () => invoke(IpcChannel.agentCurrent, {}),
     history: (payload: unknown) => invoke(IpcChannel.agentHistory, payload),
     transcript: (payload: unknown) => invoke(IpcChannel.agentTranscript, payload),

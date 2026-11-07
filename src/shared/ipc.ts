@@ -1,5 +1,12 @@
 import { z } from 'zod'
-import { agentCancelSchema, agentEventSchema, agentSubmitSchema } from './agent.ts'
+import {
+  agentApproveSchema,
+  agentCancelSchema,
+  agentEventSchema,
+  agentRejectSchema,
+  agentRestoreSchema,
+  agentSubmitSchema
+} from './agent.ts'
 import { providerSetSchema } from './provider.ts'
 
 const invalid = { error: 'Invalid request' } as const
@@ -102,6 +109,9 @@ export const IpcChannel = {
   terminalExit: 'terminal:exit',
   agentSubmit: 'agent:submit',
   agentCancel: 'agent:cancel',
+  agentApprove: 'agent:approve',
+  agentReject: 'agent:reject',
+  agentRestore: 'agent:restore',
   agentCurrent: 'agent:current',
   agentHistory: 'agent:history',
   agentTranscript: 'agent:transcript',
@@ -134,6 +144,9 @@ export const requestSchemas = {
   [IpcChannel.historyFileChanges]: historyQuerySchema,
   [IpcChannel.agentSubmit]: agentSubmitSchema,
   [IpcChannel.agentCancel]: agentCancelSchema,
+  [IpcChannel.agentApprove]: agentApproveSchema,
+  [IpcChannel.agentReject]: agentRejectSchema,
+  [IpcChannel.agentRestore]: agentRestoreSchema,
   [IpcChannel.agentCurrent]: emptyRequestSchema,
   [IpcChannel.agentHistory]: historyQuerySchema,
   [IpcChannel.agentTranscript]: agentCancelSchema

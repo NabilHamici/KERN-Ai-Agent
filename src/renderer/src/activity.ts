@@ -30,11 +30,7 @@ export type AgentActivity = {
 const SCAN_TOOLS = new Set(['list_files', 'search_files'])
 const READ_TOOLS = new Set(['read_file'])
 
-/**
- * Write and edit tools belong here once the broker can run them.
- * The set is empty, so Refactoring is never shown from the current tools.
- */
-export const REFACTOR_TOOLS = new Set<string>()
+export const REFACTOR_TOOLS = new Set(['create_file', 'edit_file', 'delete_file', 'rename_file'])
 
 const LABELS: Record<AgentActivityPhase, string> = {
   idle: 'Idle',

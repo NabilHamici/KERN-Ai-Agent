@@ -25,6 +25,10 @@ export class WorkspaceService {
     return { path: this.root, name: path.basename(this.root) }
   }
 
+  sessionMissionId(): string | null {
+    return this.missionId
+  }
+
   restore(): WorkspaceInfo | null {
     const saved = this.database.getSetting(WORKSPACE_SETTING)
     if (!saved) {

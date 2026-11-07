@@ -10,6 +10,7 @@ import { executeTool } from '../src/main/agent/tools.ts'
 import { AGENT_LIMITS, assertTransition, canTransition } from '../src/shared/agent.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { MissionDatabase } from '../src/main/services/database.ts'
+import { WorkspaceService } from '../src/main/services/workspace.ts'
 import type { AgentEvent } from '../src/shared/agent.ts'
 
 const secret = 'bc_live_runtime_secret'
@@ -20,6 +21,20 @@ function temporaryDirectory(): string {
 
 function database(): MissionDatabase {
   return new MissionDatabase(path.join(temporaryDirectory(), 'kern.sqlite'))
+}
+
+function openWorkspace(db: MissionDatabase, root: string): WorkspaceService {
+  const workspace = new WorkspaceService(db)
+  workspace.open(root)
+  return workspace
+}
+
+const loopStubs = {
+  proposeMutation: () => ({
+    execution: { state: 'rejected' as const, output: JSON.stringify({ ok: false, error: 'unused' }) },
+    operationId: null
+  }),
+  waitForApprovals: async () => [] as Array<{ callId: string; execution: { state: 'finished' | 'rejected'; output: string } }>
 }
 
 function completion(summary = 'Inspection finished.'): ProviderTurn {
@@ -66,6 +81,7 @@ test('persists a mission, records a read, and completes only from submit_result'
   }
   const runtime = new AgentRuntime({
     database: db,
+    workspace: openWorkspace(db, root),
     currentWorkspace: () => ({ path: root, name: 'demo' }),
     readApiKey: async () => secret,
     emit: (event) => events.push(event),
@@ -124,6 +140,8 @@ test('a rejected call explains the invalid argument and the next turn can recove
       return completion('Read README.md')
     },
     executeTool: (name, argumentsText, cache) => executeTool(root, 'demo', name, argumentsText, cache),
+    proposeMutation: loopStubs.proposeMutation,
+    waitForApprovals: loopStubs.waitForApprovals,
     onStatus: () => undefined,
     onText: () => undefined,
     onTool: () => undefined
@@ -168,6 +186,8 @@ test('two reads of one file in the same turn execute the file once', async () =>
       fs.writeFileSync(path.join(root, 'README.md'), 'beta')
       return execution
     },
+    proposeMutation: loopStubs.proposeMutation,
+    waitForApprovals: loopStubs.waitForApprovals,
     onStatus: () => undefined,
     onText: () => undefined,
     onTool: () => undefined
@@ -184,6 +204,7 @@ test('stops at the iteration limit when the model never submits a result', async
   let calls = 0
   const runtime = new AgentRuntime({
     database: db,
+    workspace: openWorkspace(db, root),
     currentWorkspace: () => ({ path: root, name: 'demo' }),
     readApiKey: async () => secret,
     emit: () => undefined,
@@ -208,6 +229,7 @@ test('rejects an invalid tool call and does not treat plain text as completion',
   let calls = 0
   const runtime = new AgentRuntime({
     database: db,
+    workspace: openWorkspace(db, root),
     currentWorkspace: () => ({ path: root, name: 'demo' }),
     readApiKey: async () => secret,
     emit: () => undefined,
@@ -239,6 +261,7 @@ test('cancels a running mission', async () => {
   const db = database()
   const runtime = new AgentRuntime({
     database: db,
+    workspace: openWorkspace(db, root),
     currentWorkspace: () => ({ path: root, name: 'demo' }),
     readApiKey: async () => secret,
     emit: () => undefined,
@@ -265,6 +288,7 @@ test('fails a mission when the provider fails and does not execute tools', async
   let tools = 0
   const runtime = new AgentRuntime({
     database: db,
+    workspace: openWorkspace(db, root),
     currentWorkspace: () => ({ path: root, name: 'demo' }),
     readApiKey: async () => secret,
     emit: () => undefined,
@@ -300,6 +324,8 @@ test('stops when the tool-call limit is reached and does not run the extra call'
       executed += 1
       return { state: 'finished', output: '{"ok":true}' }
     },
+    proposeMutation: loopStubs.proposeMutation,
+    waitForApprovals: loopStubs.waitForApprovals,
     onStatus: () => undefined,
     onText: () => undefined,
     onTool: () => undefined
@@ -321,6 +347,8 @@ test('does not execute tools from an incomplete response', async () => {
       executed += 1
       return { state: 'finished', output: '{}' }
     },
+    proposeMutation: loopStubs.proposeMutation,
+    waitForApprovals: loopStubs.waitForApprovals,
     onStatus: () => undefined,
     onText: () => undefined,
     onTool: () => undefined
@@ -338,6 +366,7 @@ test('marks an interrupted mission and does not resume it', async () => {
   let calls = 0
   const runtime = new AgentRuntime({
     database: db,
+    workspace: openWorkspace(db, root),
     currentWorkspace: () => ({ path: root, name: 'demo' }),
     readApiKey: async () => secret,
     emit: () => undefined,
@@ -365,6 +394,7 @@ test('redacts the API key from streamed text', async () => {
   const events: AgentEvent[] = []
   const runtime = new AgentRuntime({
     database: db,
+    workspace: openWorkspace(db, root),
     currentWorkspace: () => ({ path: root, name: 'demo' }),
     readApiKey: async () => secret,
     emit: (event) => events.push(event),

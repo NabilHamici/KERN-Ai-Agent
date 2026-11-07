@@ -1,15 +1,24 @@
 import {
   AgentError,
   isTerminalStatus,
+  isMutationTool,
   redactSensitive,
   type AgentEvent,
   type AgentMissionSummary,
+  type AgentOperationSummary,
   type AgentTranscript,
   type MissionStatus
 } from '../../shared/agent.ts'
 import type { ProviderId } from '../../shared/provider.ts'
 import type { MissionDatabase } from '../services/database.ts'
+import type { WorkspaceService } from '../services/workspace.ts'
 import { runAgentLoop, type ModelClient } from './loop.ts'
+import {
+  applyClaimedOperation,
+  proposeMutation,
+  proposalEventPayload,
+  restoreOperation
+} from './mutations.ts'
 import { requestBharatCode, type ProviderTurn } from './provider.ts'
 import { executeTool } from './tools.ts'
 import type { FunctionCall } from './provider.ts'
@@ -17,11 +26,22 @@ import type { ToolExecution } from './tools.ts'
 
 type WorkspaceSnapshot = { path: string; name: string }
 
+type ApprovalWaiter = {
+  missionId: string
+  operationIds: Set<string>
+  results: Map<string, { callId: string; execution: ToolExecution }>
+  resolve: (value: Array<{ callId: string; execution: ToolExecution }>) => void
+  reject: (error: Error) => void
+}
+
 export class AgentRuntime {
   private busy = false
   private tail: Promise<void> = Promise.resolve()
   private readonly controllers = new Map<string, AbortController>()
+  private readonly locks = new Map<string, Promise<void>>()
+  private readonly waiters = new Map<string, ApprovalWaiter>()
   private readonly database: MissionDatabase
+  private readonly workspace: WorkspaceService
   private readonly currentWorkspace: () => WorkspaceSnapshot | null
   private readonly readApiKey: () => Promise<string | null>
   private readonly cursorReady: () => Promise<boolean>
@@ -31,7 +51,8 @@ export class AgentRuntime {
 
   constructor(options: {
     database: MissionDatabase
-    currentWorkspace: () => WorkspaceSnapshot | null
+    workspace: WorkspaceService
+    currentWorkspace?: () => WorkspaceSnapshot | null
     readApiKey: () => Promise<string | null>
     cursorReady?: () => Promise<boolean>
     readProvider?: () => ProviderId
@@ -39,7 +60,8 @@ export class AgentRuntime {
     client?: ModelClient
   }) {
     this.database = options.database
-    this.currentWorkspace = options.currentWorkspace
+    this.workspace = options.workspace
+    this.currentWorkspace = options.currentWorkspace ?? (() => options.workspace.current())
     this.readApiKey = options.readApiKey
     this.cursorReady = options.cursorReady ?? (async () => false)
     this.readProvider = options.readProvider ?? (() => 'bharatcode')
@@ -102,13 +124,41 @@ export class AgentRuntime {
     if (!controller) {
       return { cancelled: false }
     }
-    this.finish(missionId, 'cancelled', null, 'The mission was cancelled.')
-    controller.abort()
+    void this.withMissionLock(missionId, async () => {
+      this.database.cancelPendingAgentOperations(missionId)
+      const waiter = this.waiters.get(missionId)
+      if (waiter) {
+        for (const operationId of [...waiter.operationIds]) {
+          const operation = this.database.getAgentOperation(operationId)
+          if (!operation) {
+            continue
+          }
+          this.publishProposal(operation)
+          if (!waiter.results.has(operation.callId)) {
+            waiter.results.set(operation.callId, {
+              callId: operation.callId,
+              execution: {
+                state: 'rejected',
+                output: JSON.stringify({
+                  ok: false,
+                  operationId,
+                  status: 'cancelled',
+                  error: 'The mission was cancelled.'
+                })
+              }
+            })
+          }
+        }
+        this.settleWaiter(missionId)
+      }
+      this.finish(missionId, 'cancelled', null, 'The mission was cancelled.')
+      controller.abort()
+    })
     return { cancelled: true }
   }
 
   stopAll(): void {
-    for (const missionId of this.controllers.keys()) {
+    for (const missionId of [...this.controllers.keys()]) {
       this.cancel(missionId)
     }
   }
@@ -133,6 +183,103 @@ export class AgentRuntime {
     return this.database.agentTranscript(active.id)
   }
 
+  async approve(missionId: string, operationId: string): Promise<{ applied: boolean; duplicate: boolean; status: string }> {
+    return this.withMissionLock(missionId, async () => {
+      const mission = this.database.getAgentMission(missionId)
+      if (!mission) {
+        throw new AgentError('Mission not found.')
+      }
+      if (mission.status !== 'awaiting_approval') {
+        throw new AgentError('Mission is not awaiting approval.')
+      }
+      const existing = this.database.getAgentOperationRecord(operationId)
+      if (!existing || existing.missionId !== missionId) {
+        throw new AgentError('Operation does not belong to this mission.')
+      }
+      if (existing.status === 'applied') {
+        return { applied: true, duplicate: true, status: 'applied' }
+      }
+      if (existing.status !== 'pending') {
+        throw new AgentError(`Operation is ${existing.status} and cannot be approved.`)
+      }
+      const claimed = this.database.claimAgentOperation(missionId, operationId)
+      if (!claimed) {
+        const again = this.database.getAgentOperation(operationId)
+        if (again?.status === 'applied') {
+          return { applied: true, duplicate: true, status: 'applied' }
+        }
+        throw new AgentError('Operation could not be claimed for approval.')
+      }
+      // Bind approval to the immutable fingerprint captured at propose time.
+      const fingerprint = claimed.contentFingerprint
+      const root = this.currentWorkspace()?.path
+      if (!root) {
+        this.database.finalizeAgentOperation(operationId, 'failed', { error: 'No workspace is open.' })
+        throw new AgentError('No workspace is open.')
+      }
+      const result = applyClaimedOperation({
+        root,
+        database: this.database,
+        workspace: this.workspace,
+        record: claimed,
+        expectedFingerprint: fingerprint
+      })
+      this.publishProposal(result.operation)
+      this.noteApprovalResult(missionId, result.operation.callId, {
+        state: result.ok ? 'finished' : 'rejected',
+        output: result.output
+      })
+      return { applied: result.ok, duplicate: false, status: result.operation.status }
+    })
+  }
+
+  async reject(missionId: string, operationId: string): Promise<{ rejected: boolean }> {
+    return this.withMissionLock(missionId, async () => {
+      const mission = this.database.getAgentMission(missionId)
+      if (!mission) {
+        throw new AgentError('Mission not found.')
+      }
+      if (mission.status !== 'awaiting_approval') {
+        throw new AgentError('Mission is not awaiting approval.')
+      }
+      const existing = this.database.getAgentOperation(operationId)
+      if (!existing || existing.missionId !== missionId) {
+        throw new AgentError('Operation does not belong to this mission.')
+      }
+      if (existing.status === 'rejected') {
+        return { rejected: true }
+      }
+      const rejected = this.database.rejectAgentOperation(missionId, operationId)
+      if (!rejected) {
+        throw new AgentError('Operation could not be rejected.')
+      }
+      this.publishProposal(rejected)
+      this.noteApprovalResult(missionId, rejected.callId, {
+        state: 'rejected',
+        output: JSON.stringify({
+          ok: false,
+          operationId,
+          status: 'rejected',
+          error: 'The user rejected this proposal. Do not retry the identical proposal.'
+        })
+      })
+      return { rejected: true }
+    })
+  }
+
+  restore(operationId: string): { restored: true } {
+    const root = this.currentWorkspace()?.path
+    if (!root) {
+      throw new AgentError('No workspace is open.')
+    }
+    return restoreOperation({
+      root,
+      database: this.database,
+      workspace: this.workspace,
+      operationId
+    })
+  }
+
   private async execute(missionId: string, workspace: WorkspaceSnapshot, secret: string, controller: AbortController): Promise<void> {
     let iteration = 0
     let streamed = ''
@@ -155,6 +302,27 @@ export class AgentRuntime {
           return this.client(input)
         },
         executeTool: (name, argumentsText, cache) => executeTool(workspace.path, workspace.name, name, argumentsText, cache),
+        proposeMutation: (call) => {
+          if (!isMutationTool(call.name)) {
+            return {
+              execution: { state: 'rejected', output: JSON.stringify({ ok: false, error: 'Tool is not available.' }) },
+              operationId: null
+            }
+          }
+          const proposed = proposeMutation({
+            root: workspace.path,
+            database: this.database,
+            missionId,
+            callId: call.callId,
+            name: call.name,
+            argumentsText: call.arguments
+          })
+          if (proposed.operation) {
+            this.publishProposal(proposed.operation)
+          }
+          return { execution: proposed.execution, operationId: proposed.operation?.id ?? null }
+        },
+        waitForApprovals: (operationIds) => this.waitForApprovals(missionId, operationIds, controller.signal),
         onStatus: (status) => {
           flushText()
           this.finish(missionId, status, null, null, false)
@@ -195,8 +363,127 @@ export class AgentRuntime {
         this.publish({ type: 'finished', missionId, status: 'failed', summary: message })
       }
     } finally {
+      this.waiters.delete(missionId)
       this.controllers.delete(missionId)
       this.busy = false
+    }
+  }
+
+  private waitForApprovals(
+    missionId: string,
+    operationIds: string[],
+    signal: AbortSignal
+  ): Promise<Array<{ callId: string; execution: ToolExecution }>> {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        reject(abortError())
+        return
+      }
+      const waiter: ApprovalWaiter = {
+        missionId,
+        operationIds: new Set(operationIds),
+        results: new Map(),
+        resolve,
+        reject
+      }
+      this.waiters.set(missionId, waiter)
+      const onAbort = (): void => {
+        signal.removeEventListener('abort', onAbort)
+        void this.withMissionLock(missionId, async () => {
+          this.database.cancelPendingAgentOperations(missionId)
+          for (const operationId of operationIds) {
+            const operation = this.database.getAgentOperation(operationId)
+            if (!operation) {
+              continue
+            }
+            this.publishProposal(operation)
+            if (!waiter.results.has(operation.callId)) {
+              waiter.results.set(operation.callId, {
+                callId: operation.callId,
+                execution: {
+                  state: 'rejected',
+                  output: JSON.stringify({
+                    ok: false,
+                    operationId,
+                    status: operation.status,
+                    error: operation.error ?? 'The mission was cancelled.'
+                  })
+                }
+              })
+            }
+          }
+          this.settleWaiter(missionId)
+        })
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      // Already-resolved ops (rejected at propose) are not in the waiter set.
+      this.maybeSettleWaiter(missionId)
+    })
+  }
+
+  private noteApprovalResult(missionId: string, callId: string, execution: ToolExecution): void {
+    const waiter = this.waiters.get(missionId)
+    if (!waiter) {
+      return
+    }
+    waiter.results.set(callId, { callId, execution })
+    this.maybeSettleWaiter(missionId)
+  }
+
+  private maybeSettleWaiter(missionId: string): void {
+    const waiter = this.waiters.get(missionId)
+    if (!waiter) {
+      return
+    }
+    const pending = this.database.listPendingAgentOperations(missionId).filter((op) => waiter.operationIds.has(op.id))
+    if (pending.length > 0) {
+      return
+    }
+    for (const operationId of waiter.operationIds) {
+      const operation = this.database.getAgentOperation(operationId)
+      if (!operation) {
+        continue
+      }
+      if (!waiter.results.has(operation.callId)) {
+        waiter.results.set(operation.callId, {
+          callId: operation.callId,
+          execution: {
+            state: operation.status === 'applied' ? 'finished' : 'rejected',
+            output: JSON.stringify({
+              ok: operation.status === 'applied',
+              operationId: operation.id,
+              status: operation.status,
+              error: operation.error
+            })
+          }
+        })
+      }
+    }
+    this.settleWaiter(missionId)
+  }
+
+  private settleWaiter(missionId: string): void {
+    const waiter = this.waiters.get(missionId)
+    if (!waiter) {
+      return
+    }
+    this.waiters.delete(missionId)
+    waiter.resolve([...waiter.results.values()])
+  }
+
+  private async withMissionLock<T>(missionId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.locks.get(missionId) ?? Promise.resolve()
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const chained = previous.catch(() => undefined).then(() => held)
+    this.locks.set(missionId, chained)
+    await previous.catch(() => undefined)
+    try {
+      return await work()
+    } finally {
+      release()
     }
   }
 
@@ -244,7 +531,21 @@ export class AgentRuntime {
     })
   }
 
+  private publishProposal(operation: AgentOperationSummary): void {
+    this.publish({
+      type: 'proposal',
+      missionId: operation.missionId,
+      operation: proposalEventPayload(operation)
+    })
+  }
+
   private publish(event: AgentEvent): void {
     this.emit(event)
   }
+}
+
+function abortError(): Error {
+  const error = new Error('The mission was cancelled.')
+  error.name = 'AbortError'
+  return error
 }

@@ -120,6 +120,7 @@ void app.whenReady().then(async () => {
   const userData = app.getPath('userData')
   const runtime = new AgentRuntime({
     database: db,
+    workspace,
     currentWorkspace: () => workspace.current(),
     readApiKey: () => readSecret(userData),
     cursorReady: () => cursorUsesStoredLogin(),
