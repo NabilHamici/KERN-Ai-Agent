@@ -1,0 +1,58 @@
+KERN
+====
+
+Project
+-------
+KERN — From intention to verified code.
+
+An independent AI-powered desktop development environment that understands
+projects, writes and edits code, runs development commands, and verifies
+results inside one Electron app (explorer, Monaco editor, terminal, agent).
+
+BharatCode Build League
+-----------------------
+Category: Coding & developer tools
+
+This project uses BharatCode's model API to power its autonomous coding agent.
+
+Models
+------
+- Default wired model: qwen-3.8-27b (Qwen 3.8 27B)
+- Product surface also features: deepseek-v4.1-flash (DeepSeek V4.1 Flash)
+
+Integration notes
+-----------------
+- Provider: BharatCode only (https://bharatcode.ai/)
+- API base used by the agent: https://bharatcode.ai/api/model/v1
+- API keys are entered in the app Settings UI and stored with Electron
+  safeStorage in the main process. They are never committed to this repo.
+
+How to try it
+-------------
+1. Clone this repository (public GitHub).
+2. Install Node.js >= 22.12 and pnpm 12.x.
+3. Run: pnpm install && pnpm dev
+4. Open Settings, save your BharatCode API key, then open a workspace folder.
+5. Auth/register uses the production KERN API by default:
+   https://backup.shedrive-app.com
+   (Override with KERN_API_URL only if you self-host the backend.)
+
+What judges / voters should look for
+------------------------------------
+- End-to-end agent loop: plan → tools → files → commands → verification
+- Sandboxed Electron security (renderer has no Node/fs/shell)
+- Project-aware chats, diffs, undo, Git status/publish flows
+- Real BharatCode model calls (not mocked responses)
+
+Attribution
+-----------
+KERN is an independently engineered product with BharatCode model integration.
+It is not an official BharatCode product unless BharatCode states otherwise.
+
+Links
+-----
+- Product README: ./README.md
+- BharatCode: https://bharatcode.ai/
+- Hackathon: https://www.bharatcode.ai/hackathon
+
+Do not put secrets, tokens, or private user data in this file or this repository.
