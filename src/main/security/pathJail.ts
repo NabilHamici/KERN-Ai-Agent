@@ -144,19 +144,49 @@ export function resolveEntry(rootInput: string, relativePath: string): Workspace
   if (relative === '.') {
     return { root, lexical: root, exists: true, isSymbolicLink: false }
   }
-  const parentRelative = path.posix.dirname(relative)
-  const name = path.posix.basename(relative)
-  const parent = parentRelative === '.' ? root : resolveInside(root, parentRelative)
-  if (!fs.statSync(parent).isDirectory()) {
-    throw new PathJailError('Not a directory')
+
+  // Walk existing segments for real. Missing parents stay lexical and inside the
+  // jail so a later create can make them. Never follow a symlink outside the root.
+  const parts = relative.split('/')
+  let current = root
+  for (let index = 0; index < parts.length; index += 1) {
+    const nextLexical = path.join(current, parts[index]!)
+    assertInsideRoot(root, nextLexical)
+    const isLast = index === parts.length - 1
+    if (!exists(nextLexical)) {
+      let lexical = nextLexical
+      for (let rest = index + 1; rest < parts.length; rest += 1) {
+        lexical = path.join(lexical, parts[rest]!)
+        assertInsideRoot(root, lexical)
+      }
+      return { root, lexical, exists: false, isSymbolicLink: false }
+    }
+    const stat = fs.lstatSync(nextLexical)
+    if (stat.isSymbolicLink()) {
+      if (isLast) {
+        return { root, lexical: nextLexical, exists: true, isSymbolicLink: true }
+      }
+      let target: string
+      try {
+        target = fs.realpathSync(nextLexical)
+      } catch {
+        throw new PathJailError('Path escapes the workspace')
+      }
+      assertInsideRoot(root, target)
+      if (!fs.statSync(target).isDirectory()) {
+        throw new PathJailError('Not a directory')
+      }
+      current = target
+      continue
+    }
+    if (!isLast && !stat.isDirectory()) {
+      throw new PathJailError('Not a directory')
+    }
+    if (isLast) {
+      return { root, lexical: nextLexical, exists: true, isSymbolicLink: false }
+    }
+    current = fs.realpathSync(nextLexical)
+    assertInsideRoot(root, current)
   }
-  const lexical = path.join(parent, name)
-  assertInsideRoot(root, lexical)
-  const isThere = exists(lexical)
-  return {
-    root,
-    lexical,
-    exists: isThere,
-    isSymbolicLink: isThere && fs.lstatSync(lexical).isSymbolicLink()
-  }
+  throw new PathJailError('Path is invalid')
 }

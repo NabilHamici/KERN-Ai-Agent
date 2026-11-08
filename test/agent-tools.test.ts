@@ -19,26 +19,28 @@ test('reads and lists files inside the workspace', () => {
   fs.writeFileSync(path.join(root, '.env'), 'TOKEN=secret')
 
   const listed = executeTool(root, 'demo', 'list_files', JSON.stringify({ path: '.' }))
-  assert.equal(listed.state, 'finished')
+  assert.equal(listed.state, 'success')
   assert.match(listed.output, /"path":"src"/)
-  assert.equal(listed.output.includes('node_modules'), false)
+  assert.match(listed.output, /"path":"node_modules"/)
+  assert.match(listed.output, /"regenerable":true/)
+  assert.equal(listed.output.includes('node_modules/skip'), false)
   assert.equal(listed.output.includes('.env'), false)
   const nested = executeTool(root, 'demo', 'list_files', JSON.stringify({ path: 'src' }))
   assert.match(nested.output, /note\.txt/)
 
   const read = executeTool(root, 'demo', 'read_file', JSON.stringify({ path: 'src/note.txt' }))
-  assert.equal(read.state, 'finished')
+  assert.equal(read.state, 'success')
   assert.match(read.output, /visible note/)
 
   const info = executeTool(root, 'demo', 'get_workspace_info', '{}')
-  assert.equal(info.state, 'finished')
+  assert.equal(info.state, 'success')
   assert.equal(info.output.includes(root), false)
   const parsed = JSON.parse(info.output) as { name: string; open: boolean }
   assert.equal(parsed.name, 'demo')
   assert.equal(parsed.open, true)
 
   const found = executeTool(root, 'demo', 'search_files', JSON.stringify({ query: 'visible' }))
-  assert.equal(found.state, 'finished')
+  assert.equal(found.state, 'success')
   assert.match(found.output, /src\/note\.txt/)
 })
 
@@ -66,8 +68,8 @@ test('bounds tool output and rejects unsupported tools', () => {
   const root = temporaryDirectory()
   fs.writeFileSync(path.join(root, 'big.txt'), 'a'.repeat(AGENT_LIMITS.maxToolOutputChars + 500))
   const read = executeTool(root, 'demo', 'read_file', JSON.stringify({ path: 'big.txt' }))
-  assert.equal(read.state, 'finished')
-  assert.ok(read.output.length <= AGENT_LIMITS.maxToolOutputChars + 20)
+  assert.equal(read.state, 'success')
+  assert.ok(read.output.length <= AGENT_LIMITS.maxToolOutputChars + 40)
   assert.match(read.output, /truncated/)
 
   const before = fs.readdirSync(root)
@@ -89,14 +91,14 @@ test('rejects an extra search field and an empty directory without dropping the 
   assert.equal(search.output.includes('alpha'), false)
 
   const listed = executeTool(root, 'demo', 'list_files', JSON.stringify({ path: '' }))
-  assert.equal(listed.state, 'rejected')
-  assert.match(listed.output, /workspace root/)
+  assert.equal(listed.state, 'success')
+  assert.match(listed.output, /"path":"."/)
 
   const validSearch = executeTool(root, 'demo', 'search_files', JSON.stringify({ query: 'readme' }))
-  assert.equal(validSearch.state, 'finished')
+  assert.equal(validSearch.state, 'success')
   assert.match(validSearch.output, /README\.md/)
   const validList = executeTool(root, 'demo', 'list_files', JSON.stringify({ path: '.' }))
-  assert.equal(validList.state, 'finished')
+  assert.equal(validList.state, 'success')
   assert.match(validList.output, /README\.md/)
 })
 

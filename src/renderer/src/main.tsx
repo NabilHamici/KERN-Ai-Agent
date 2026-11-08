@@ -1,6 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { App } from './App'
+import { AuthGate } from './AuthGate'
 import { installMonaco } from './monaco'
 import './styles.css'
 
@@ -13,6 +13,6 @@ if (!root) {
 
 createRoot(root).render(
   <StrictMode>
-    <App />
+    <AuthGate />
   </StrictMode>
 )

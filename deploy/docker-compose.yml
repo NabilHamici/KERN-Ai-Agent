@@ -1,0 +1,103 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kern}
+      POSTGRES_USER: ${POSTGRES_USER:-kern}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - kern_pg_data:/var/lib/postgresql/data
+    networks:
+      - kern_internal
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Intentionally no public ports. Backend reaches Postgres on the private network only.
+
+  backend:
+    build:
+      context: ../server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://${POSTGRES_USER:-kern}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-kern}
+      APP_URL: ${APP_URL:?APP_URL is required}
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required}
+      SMTP_HOST: ${SMTP_HOST:?SMTP_HOST is required}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-KERN}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:?SMTP_FROM_EMAIL is required}
+      EMAIL_DEV_MODE: 'false'
+    networks:
+      - kern_internal
+      - kern_proxy
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:4000/api/v1/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    # No published host ports. Caddy reaches backend over kern_proxy.
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      KERN_DOMAIN: ${KERN_DOMAIN:?KERN_DOMAIN is required}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - kern_proxy
+
+  migrate:
+    profiles: ['migrate']
+    build:
+      context: ../server
+      dockerfile: Dockerfile
+    command: ['node', 'dist/db/migrate.js']
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-kern}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-kern}
+      APP_URL: ${APP_URL:-http://localhost}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+      SMTP_HOST: ${SMTP_HOST:-smtp.example.com}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-noreply@example.com}
+      EMAIL_DEV_MODE: 'false'
+      LOG_LEVEL: info
+      PORT: 4000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - kern_internal
+    restart: 'no'
+
+volumes:
+  kern_pg_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  kern_internal:
+    internal: true
+  kern_proxy:

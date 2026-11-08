@@ -11,6 +11,9 @@ export const KERN_TOOL_NAMES = [
   'edit_file',
   'delete_file',
   'rename_file',
+  'list_file_operations',
+  'restore_file',
+  'run_command',
   'submit_result'
 ] as const
 

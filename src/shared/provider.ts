@@ -16,6 +16,7 @@ export const CONNECTION_STATES = [
 export type ConnectionState = (typeof CONNECTION_STATES)[number]
 
 export const CURSOR_INCLUDED_MODEL = 'composer-2.5'
+export const BHARATCODE_MODEL_ID = 'qwen-3.8-27b'
 
 export const providerSetSchema = z.strictObject({
   provider: z.enum(PROVIDER_IDS)
@@ -30,7 +31,26 @@ export function isConnectionState(value: string | null | undefined): value is Co
 }
 
 export function providerLabel(provider: ProviderId): string {
-  return provider === 'cursor' ? 'Cursor' : 'BharatCode'
+  return provider === 'cursor' ? 'dev provider' : 'BharatCode'
+}
+
+/** Human-facing model id (real configured model; no product branding). */
+export function modelDisplayName(provider: ProviderId): string {
+  return provider === 'cursor' ? CURSOR_INCLUDED_MODEL : BHARATCODE_MODEL_ID
+}
+
+/** Header/status chip: provider · model, or No provider when unset. */
+export function providerModelChip(
+  provider: ProviderId | null | undefined,
+  connection: ConnectionState | null | undefined
+): { title: string; detail: string } {
+  if (!provider || connection === 'not_configured') {
+    return { title: 'No provider', detail: 'Configure BharatCode in Settings.' }
+  }
+  return {
+    title: `${providerLabel(provider)} · ${modelDisplayName(provider)}`,
+    detail: connectionDetail(provider, connection ?? 'not_configured')
+  }
 }
 
 export function connectionLabel(state: ConnectionState, running: boolean): string {
@@ -41,9 +61,9 @@ export function connectionLabel(state: ConnectionState, running: boolean): strin
     case 'not_configured':
       return 'Not configured'
     case 'credentials_stored':
-      return 'Not verified'
+      return 'Key stored'
     case 'verified':
-      return 'Verified'
+      return 'Healthy'
     case 'authentication_failed':
       return 'Auth failed'
     case 'usage_restricted':
@@ -54,27 +74,27 @@ export function connectionLabel(state: ConnectionState, running: boolean): strin
 }
 
 export function connectionDetail(provider: ProviderId, state: ConnectionState): string {
-  const name = providerLabel(provider)
+  const model = modelDisplayName(provider)
   switch (state) {
     case 'not_configured':
       return provider === 'cursor'
-        ? 'Cursor is not signed in on this Mac. KERN uses the saved Cursor login, not a pasted API key.'
-        : `No ${name} API key is stored.`
+        ? `No local SDK login is available for model ${model}.`
+        : `No BharatCode API key is stored for ${model}.`
     case 'credentials_stored':
       return provider === 'cursor'
-        ? 'Signed in with the Cursor login on this Mac. The connection has not been verified.'
-        : 'A key is stored. The connection has not been verified.'
+        ? `SDK login is available for ${model}. Connection has not been checked.`
+        : `Key stored for ${model}. Connection has not been checked.`
     case 'verified':
-      return `The last ${name} check succeeded.`
+      return `Last health check for ${model} succeeded.`
     case 'authentication_failed':
       return provider === 'cursor'
-        ? 'Cursor could not use the saved login on this Mac.'
-        : `${name} rejected the API key.`
+        ? `SDK login could not be used for ${model}.`
+        : `BharatCode rejected the API key for ${model}.`
     case 'usage_restricted':
       return provider === 'cursor'
-        ? 'Cursor usage is outside the included Composer 2.5 pool for this account.'
+        ? `Usage for ${model} is restricted on this account.`
         : 'BharatCode rejected the request because the account cannot use the API.'
     case 'unavailable':
-      return `${name} could not be reached.`
+      return `${model} could not be reached.`
   }
 }

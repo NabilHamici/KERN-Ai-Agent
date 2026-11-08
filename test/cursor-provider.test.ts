@@ -46,9 +46,12 @@ test('Cursor agent options disable host tools and pin Composer 2.5', () => {
     'delete_file',
     'edit_file',
     'get_workspace_info',
+    'list_file_operations',
     'list_files',
     'read_file',
     'rename_file',
+    'restore_file',
+    'run_command',
     'search_files',
     'submit_result'
   ])

@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" role="img" aria-label="KERN">
+  <defs>
+    <linearGradient id="kernGrad" x1="18" y1="110" x2="110" y2="18" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#7C3AED"/>
+      <stop offset="55%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#22D3EE"/>
+    </linearGradient>
+  </defs>
+  <g stroke="url(#kernGrad)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M64 18 L98 38 L98 78 L64 98 L30 78 L30 38 Z"/>
+    <path d="M64 34 L86 47 L86 73 L64 86 L42 73 L42 47 Z"/>
+    <path d="M64 18 L64 34"/>
+    <path d="M98 38 L86 47"/>
+    <path d="M98 78 L86 73"/>
+    <path d="M64 98 L64 86"/>
+    <path d="M30 78 L42 73"/>
+    <path d="M30 38 L42 47"/>
+    <path d="M42 47 L64 34 L86 47"/>
+    <path d="M86 73 L64 86 L42 73"/>
+  </g>
+  <g fill="url(#kernGrad)">
+    <circle cx="64" cy="18" r="4.2"/>
+    <circle cx="98" cy="38" r="4.2"/>
+    <circle cx="98" cy="78" r="4.2"/>
+    <circle cx="64" cy="98" r="4.2"/>
+    <circle cx="30" cy="78" r="4.2"/>
+    <circle cx="30" cy="38" r="4.2"/>
+    <circle cx="64" cy="34" r="3.4"/>
+    <circle cx="86" cy="47" r="3.4"/>
+    <circle cx="86" cy="73" r="3.4"/>
+    <circle cx="64" cy="86" r="3.4"/>
+    <circle cx="42" cy="73" r="3.4"/>
+    <circle cx="42" cy="47" r="3.4"/>
+  </g>
+</svg>

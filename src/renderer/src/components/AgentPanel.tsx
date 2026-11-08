@@ -1,31 +1,41 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import type { AgentMissionSummary, AgentOperationSummary, AgentToolRecord } from '../../../shared/agent'
-import {
-  canCancel,
-  canSend,
-  composeOnEnter,
-  inlineParts,
-  messageBlocks,
-  shouldFollowTranscript,
-  showResponseIndicator,
-  type ConversationEntry
-} from '../conversation'
-import { agentActivity } from '../activity'
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import type {
+  AgentChatSummary,
+  AgentMissionSummary,
+  AgentOperationSummary,
+  AgentToolRecord
+} from '../../../shared/agent'
+import type { ProviderId } from '../../../shared/provider'
+import { canCancel, shouldFollowTranscript, type ConversationEntry } from '../conversation'
+import { ChangesBar, type FileChange } from '../agent/components/ChangesBar'
+import { Composer } from '../agent/components/Composer'
+import { HistoryMenu } from '../agent/components/HistoryMenu'
+import { StatusBar } from '../agent/components/StatusBar'
+import { Timeline } from '../agent/components/Timeline'
+import { deriveAgentUiStatus, statusPhaseKey } from '../agent/statusMachine'
+import { buildTimeline } from '../agent/timeline'
 import { Icon } from './Icons'
 
-type FileChange = {
+type ReviewItem = {
+  id: string
   relativePath: string
   changeType: string
-  createdAt: string
-  hasReverse?: boolean
+  reviewStatus: 'open' | 'kept' | 'undone'
+  hasReverse: boolean
+  unifiedDiff: string
+  error: string | null
 }
 
 type AgentPanelProps = {
   changes: FileChange[]
   providerReady: boolean
   providerDetail: string
+  providerId: ProviderId
   workspaceOpen: boolean
+  chat: AgentChatSummary | null
+  chats: AgentChatSummary[]
   mission: AgentMissionSummary | null
+  missions: AgentMissionSummary[]
   running: boolean
   messages: ConversationEntry[]
   tools: AgentToolRecord[]
@@ -34,18 +44,38 @@ type AgentPanelProps = {
   width: number
   onWidthChange: (width: number) => void
   onSubmit: (prompt: string) => void
+  onNewChat: () => void
+  onSelectChat: (chatId: string) => void
+  onRenameChat: (chatId: string) => void
+  onArchiveChat: (chatId: string) => void
+  onSelectMission: (missionId: string) => void
   onCancel: () => void
   onApprove: (operationId: string) => void
   onReject: (operationId: string) => void
+  onKeepAll: () => void
+  onUndoAll: () => void
+  onReviewChange: (changeId: string) => Promise<ReviewItem | null>
+  onProviderChange: (provider: ProviderId) => void
+  publishSuggestion?: { message: string; onOpen: () => void; onDismiss: () => void }
   onClose: () => void
 }
+
+const EXAMPLES = [
+  'Scaffold a new React Native Expo app in this folder',
+  'Find and fix TypeScript errors in the project',
+  'Explain how authentication works in this codebase'
+]
 
 export function AgentPanel({
   changes,
   providerReady,
   providerDetail,
+  providerId,
   workspaceOpen,
+  chat,
+  chats,
   mission,
+  missions,
   running,
   messages,
   tools,
@@ -54,57 +84,112 @@ export function AgentPanel({
   width,
   onWidthChange,
   onSubmit,
+  onNewChat,
+  onSelectChat,
+  onRenameChat,
+  onArchiveChat,
+  onSelectMission,
   onCancel,
   onApprove,
   onReject,
+  onKeepAll,
+  onUndoAll,
+  onReviewChange,
+  onProviderChange,
+  publishSuggestion,
   onClose
 }: AgentPanelProps) {
   const [draft, setDraft] = useState('')
   const [view, setView] = useState<'chat' | 'trace'>('chat')
-  const [thoughtOpen, setThoughtOpen] = useState(true)
+  const [changesOpen, setChangesOpen] = useState(false)
+  const [review, setReview] = useState<ReviewItem | null>(null)
+  const [reviewOpen, setReviewOpen] = useState(false)
+  const [now, setNow] = useState(() => Date.now())
+  const [jumpVisible, setJumpVisible] = useState(false)
   const scroller = useRef<HTMLDivElement>(null)
   const follow = useRef(true)
-  const startedTool = [...tools].reverse().find((tool) => tool.state === 'started')
-  const activeTool = startedTool ?? tools[tools.length - 1]
-  const activity = agentActivity({
+  const startedAtRef = useRef(Date.now())
+  const phaseKeyRef = useRef('idle')
+
+  const startedTool = [...tools]
+    .reverse()
+    .find((tool) => tool.state === 'started' || tool.state === 'awaiting_approval')
+  const pendingDeletes = operations.filter((item) => item.status === 'pending' && item.kind === 'delete')
+  const pendingDeletionCount = pendingDeletes.reduce((sum, item) => sum + countDeleteTargets(item.unifiedDiff), 0)
+  const uiStatus = deriveAgentUiStatus({
     running,
-    status: mission?.status ?? null,
+    missionStatus: mission?.status ?? null,
     toolName: startedTool?.name ?? null,
-    toolState: startedTool?.state ?? null
+    toolState: startedTool?.state ?? null,
+    toolArgumentsText: startedTool?.argumentsText ?? null,
+    pendingDeletionCount,
+    startedAt: startedAtRef.current,
+    now
   })
-  const pins = [
-    ...new Set(
-      tools
-        .filter((tool) => tool.state === 'finished' && tool.name === 'read_file')
-        .map((tool) => pinLabel(tool.argumentsText))
-        .filter((label) => label.length > 0)
-    )
-  ]
-  const statusLabel = mission ? mission.status.replaceAll('_', ' ') : 'Not running'
-  const responding = showResponseIndicator(running, messages)
-  const sendEnabled = canSend(draft, running, workspaceOpen)
-  const badge = running ? activity.label : mission ? statusLabel : 'Idle'
-  const liveTitle = running ? `${activity.label}${activity.label.endsWith('...') ? '' : '...'}` : 'Idle / Ready'
-  const liveDetailText = running ? liveDetail(activeTool, responding, notice) : 'Awaiting next user instruction'
-  const thoughtTools = tools.filter((tool) => tool.name !== 'submit_result')
+  // Finished missions show the FinalResult card; status bar returns to Ready.
+  const statusBarState = uiStatus.kind === 'finished' ? ({ kind: 'idle', label: 'Ready' } as const) : uiStatus
+
+  const livePhaseKey = statusPhaseKey(uiStatus)
+  useEffect(() => {
+    if (livePhaseKey !== phaseKeyRef.current) {
+      phaseKeyRef.current = livePhaseKey
+      startedAtRef.current = Date.now()
+      setNow(Date.now())
+    }
+  }, [livePhaseKey])
+
+  const timelineItems = useMemo(
+    () =>
+      buildTimeline({
+        messages,
+        tools,
+        operations,
+        mission,
+        notice
+      }),
+    [messages, tools, operations, mission, notice]
+  )
+
+  const contextPaths = useMemo(() => {
+    const paths = new Set<string>()
+    for (const tool of tools) {
+      if (tool.name !== 'read_file' || (tool.state !== 'success' && tool.state !== 'finished')) continue
+      try {
+        const parsed = JSON.parse(tool.argumentsText) as { path?: unknown }
+        if (typeof parsed.path === 'string' && parsed.path.trim()) paths.add(parsed.path)
+      } catch {
+        // ignore
+      }
+    }
+    return [...paths]
+  }, [tools])
+
+  const missionBadge = mission ? mission.status.replaceAll('_', ' ') : null
 
   useEffect(() => {
     follow.current = true
+    setJumpVisible(false)
   }, [mission?.id])
+
+  useEffect(() => {
+    if (!running) return
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [running])
 
   useEffect(() => {
     const node = scroller.current
     if (!node || !follow.current) {
+      setJumpVisible(Boolean(node && !follow.current))
       return
     }
     node.scrollTop = node.scrollHeight
-  }, [messages, responding, operations, mission?.id])
+    setJumpVisible(false)
+  }, [timelineItems, running, operations, mission?.id])
 
   function submitDraft(): void {
     const prompt = draft.trim()
-    if (!canSend(prompt, running, workspaceOpen)) {
-      return
-    }
+    if (!prompt || running || !workspaceOpen) return
     setDraft('')
     onSubmit(prompt)
   }
@@ -116,8 +201,7 @@ export function AgentPanel({
     const originWidth = width
     handle.setPointerCapture(event.pointerId)
     const onMove = (moveEvent: PointerEvent): void => {
-      const next = Math.round(originWidth + (originX - moveEvent.clientX))
-      onWidthChange(Math.min(720, Math.max(300, next)))
+      onWidthChange(Math.min(720, Math.max(300, Math.round(originWidth + (originX - moveEvent.clientX)))))
     }
     const onUp = (upEvent: PointerEvent): void => {
       handle.releasePointerCapture(upEvent.pointerId)
@@ -132,453 +216,262 @@ export function AgentPanel({
     handle.addEventListener('pointercancel', onUp)
   }
 
+  async function openReview(changeId: string): Promise<void> {
+    setReviewOpen(true)
+    setReview(await onReviewChange(changeId))
+  }
+
   return (
-    <aside className="agent" style={{ width }}>
+    <aside className="agent" style={{ width }} data-agent-panel>
       <div className="agent-resize" role="separator" aria-orientation="vertical" aria-label="Resize agent sidebar" onPointerDown={beginResize} />
-      <div className="agent-head">
-        <div className="agent-title">
-          <span className={running ? 'agent-mark is-live' : 'agent-mark'}>
-            <SparkMark />
-          </span>
-          <div className="agent-brand">
-            <span className="agent-brand-name">
-              KERN AGENT
-              <span className="idle-badge" data-agent-status={running ? 'running' : (mission?.status ?? 'idle')} data-activity={activity.phase}>
-                {badge}
-              </span>
+
+      <div className="agent-head agent-head-compact">
+        <div className="agent-title-line">
+          <button
+            type="button"
+            className="agent-chat-title"
+            title="Rename chat"
+            disabled={!chat || running}
+            onClick={() => {
+              if (chat) onRenameChat(chat.id)
+            }}
+          >
+            {chat?.title ?? 'Conversation'}
+          </button>
+          {missionBadge ? (
+            <span className="mission-status-pill" data-mission-status={mission?.status}>
+              {missionBadge}
             </span>
+          ) : null}
+        </div>
+        <div className="agent-head-actions">
+          <div className="agent-view" role="tablist" aria-label="Agent view">
+            <button type="button" role="tab" aria-pressed={view === 'chat'} onClick={() => setView('chat')}>
+              Chat
+            </button>
+            <button type="button" role="tab" aria-pressed={view === 'trace'} onClick={() => setView('trace')}>
+              Trace
+            </button>
           </div>
-        </div>
-        <div className="agent-view" role="tablist" aria-label="Agent view">
-          <button type="button" role="tab" aria-pressed={view === 'chat'} onClick={() => setView('chat')}>
-            Chat
+          <button
+            type="button"
+            className="icon-hit"
+            data-action="chat-new"
+            disabled={!workspaceOpen || running}
+            title="New chat"
+            onClick={onNewChat}
+          >
+            +
           </button>
-          <button type="button" role="tab" aria-pressed={view === 'trace'} onClick={() => setView('trace')}>
-            Trace
+          <HistoryMenu
+            chats={chats}
+            activeChatId={chat?.id ?? null}
+            workspaceOpen={workspaceOpen}
+            running={running}
+            onSelectChat={onSelectChat}
+            onRenameChat={onRenameChat}
+            onArchiveChat={onArchiveChat}
+          />
+          {missions.length > 1 ? (
+            <label className="mission-history-inline">
+              <span className="sr-only">Missions in this chat</span>
+              <select
+                data-mission-history
+                value={mission?.id ?? ''}
+                disabled={running}
+                onChange={(event) => {
+                  if (event.target.value) onSelectMission(event.target.value)
+                }}
+              >
+                {missions.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.status} · {item.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          <button type="button" className="icon-hit" title="Hide agent" onClick={onClose}>
+            <Icon name="close" />
           </button>
         </div>
-        <button type="button" className="icon-hit" title="Hide agent" onClick={onClose}>
-          <Icon name="close" />
-        </button>
       </div>
 
-      <div className="agent-live" data-agent-live={running ? '' : undefined} data-activity={activity.phase}>
-        {running ? <span className="agent-spin" /> : <Icon name="check" className="agent-live-check" />}
-        <p>
-          <strong>{liveTitle}</strong>
-          <span>{liveDetailText}</span>
-        </p>
-      </div>
+      <StatusBar
+        status={statusBarState}
+        now={now}
+        cancellable={canCancel(running, mission?.status ?? null)}
+        onCancel={onCancel}
+        onApprove={pendingDeletes[0] ? () => onApprove(pendingDeletes[0]!.id) : undefined}
+        onDeny={pendingDeletes[0] ? () => onReject(pendingDeletes[0]!.id) : undefined}
+      />
 
       <div
         className="agent-scroll"
         ref={scroller}
         onScroll={() => {
           const node = scroller.current
-          if (!node) {
-            return
-          }
+          if (!node) return
           follow.current = shouldFollowTranscript(node.scrollTop, node.scrollHeight, node.clientHeight)
+          setJumpVisible(!follow.current)
         }}
       >
-        <section className="mission-card">
-          <div className="card-top">
-            <span>Active mission</span>
-            <span>{statusLabel}</span>
-          </div>
-          <p className="mission-copy">{mission?.prompt ?? 'No mission is in progress.'}</p>
-          {notice ? <p className="hint">{notice}</p> : null}
-          <div
-            className="progress"
-            data-progress={activity.progress === null ? 'unestimated' : 'reported'}
-            title="Progress is not estimated. The status above is the persisted mission state."
-          >
-            <i />
-          </div>
-        </section>
-
         {view === 'chat' ? (
-          <div className="conversation" data-conversation>
-            {messages.length === 0 ? <p className="muted">No conversation yet.</p> : null}
-            {messages.map((entry) =>
-              entry.role === 'tool' ? (
-                <p key={entry.key} className="chat-tool" data-message-role="tool">
-                  {entry.content}
-                </p>
-              ) : (
-                <article key={entry.key} className="chat-row" data-message-role={entry.role}>
-                  <span className={entry.role === 'user' ? 'chat-avatar is-user' : 'chat-avatar is-kern'}>
-                    {entry.role === 'user' ? <UserMark /> : <SparkMark />}
-                  </span>
-                  {entry.role === 'user' ? (
-                    <div className="chat-bubble is-user">
-                      <MessageBody text={entry.content} />
-                    </div>
-                  ) : (
-                    <div className="chat-assistant">
-                      <MessageBody text={entry.content} />
-                    </div>
-                  )}
-                </article>
-              )
-            )}
-
-            {thoughtTools.length > 0 ? (
-              <div className="thought-box">
-                <button type="button" className="thought-toggle" onClick={() => setThoughtOpen((value) => !value)}>
-                  <span>
-                    <Icon name="cpu" />
-                    Thought process ({thoughtTools.length} step{thoughtTools.length === 1 ? '' : 's'})
-                  </span>
-                  <Icon name={thoughtOpen ? 'chevron-down' : 'chevron'} />
-                </button>
-                {thoughtOpen ? (
-                  <div className="thought-body">
-                    {thoughtTools.map((tool) => (
-                      <div key={tool.callId} className={tool.state === 'started' ? 'thought-step is-active' : 'thought-step'}>
-                        <TraceState state={tool.state} />
-                        <span>
-                          {tool.name}
-                          {tool.argumentsText ? ` · ${shortArgs(tool.argumentsText)}` : ''}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            {operations.map((operation) => (
-              <ProposalCard key={operation.id} operation={operation} onApprove={onApprove} onReject={onReject} />
-            ))}
-
-            {responding ? (
-              <p className="thread-wait" data-streaming="true">
-                Responding
-              </p>
-            ) : null}
-          </div>
+          <Timeline
+            items={timelineItems}
+            empty={messages.length === 0}
+            workspaceOpen={workspaceOpen}
+            examples={EXAMPLES}
+            onExample={(prompt) => setDraft(prompt)}
+            onCancel={onCancel}
+            onApprove={onApprove}
+            onReject={onReject}
+            onNextStep={(prompt) => setDraft(prompt)}
+            onReviewPath={(path) => {
+              const match = changes.find((change) => change.relativePath === path)
+              if (match) void openReview(match.id)
+            }}
+          />
         ) : (
           <section className="trace-panel" data-agent-trace>
             <div className="trace-head">
-              <h2>Execution Timeline</h2>
+              <h2>Execution Trace</h2>
               <span className="muted">{tools.length === 0 ? 'No steps' : `${tools.length} recorded`}</span>
             </div>
             {tools.length === 0 ? <p className="muted">No steps recorded.</p> : null}
             {tools.map((tool, index) => (
-              <div key={tool.callId} className={tool.state === 'started' ? 'trace-card is-started' : 'trace-card'}>
+              <div
+                key={tool.callId}
+                className={
+                  tool.state === 'awaiting_approval' || tool.state === 'started' ? 'trace-card is-started' : 'trace-card'
+                }
+              >
                 <div className="trace-card-main">
                   <TraceState state={tool.state} />
                   <div>
                     <p className="trace-title">{tool.name}</p>
                     <p className="muted">{tool.state}</p>
-                    {tool.argumentsText ? <p className="muted">{shortArgs(tool.argumentsText)}</p> : null}
+                    {tool.argumentsText ? <pre className="trace-args">{tool.argumentsText.slice(0, 2000)}</pre> : null}
+                    {tool.output ? <pre className="trace-output">{tool.output.slice(0, 4000)}</pre> : null}
                   </div>
                 </div>
                 <span className="trace-index">Step {index + 1}</span>
               </div>
             ))}
-            <section className="tool-box">
-              <header>
-                <span>Active tool execution</span>
-                <span>{activeTool?.name ?? 'idle'}</span>
-              </header>
-              {activeTool ? <pre>{activeTool.output || activeTool.argumentsText}</pre> : <p className="muted">No tool is running.</p>}
-            </section>
           </section>
         )}
-
-        <section>
-          <h2>Context pins</h2>
-          {pins.length === 0 ? <p className="muted">None</p> : null}
-          <div className="pin-row">
-            {pins.map((pin) => (
-              <span key={pin} className="pin">
-                <Icon name="file" />
-                {pin}
-              </span>
-            ))}
-          </div>
-        </section>
-        <section>
-          <h2>Recorded file changes</h2>
-          <p className="hint">Summaries come from the local mission history. Diff text is not exposed to the renderer.</p>
-          {changes.length === 0 ? <p className="muted">No saved changes yet.</p> : null}
-          {changes.map((change) => (
-            <div key={`${change.createdAt}-${change.relativePath}`} className="change-row" data-file-change={change.relativePath}>
-              <span>{change.changeType}</span>
-              <span>{change.relativePath}</span>
-              <span className="muted">{change.hasReverse ? 'previous text kept' : 'no reverse text'}</span>
-            </div>
-          ))}
-        </section>
       </div>
 
-      <div className="agent-compose">
-        {providerDetail ? <p className="hint">{providerDetail}</p> : null}
-        {!workspaceOpen ? <p className="hint">Open a folder before sending a mission.</p> : null}
-        <div className="compose-box">
-          <textarea
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key !== 'Enter' || event.nativeEvent.isComposing) {
-                return
-              }
-              if (composeOnEnter(event.shiftKey) === 'newline') {
-                return
-              }
-              event.preventDefault()
-              submitDraft()
-            }}
-            rows={2}
-            placeholder="Tell KERN what to build or edit..."
-            spellCheck={false}
-            disabled={!workspaceOpen || running}
-          />
-          <div className="compose-footer">
-            <div className="compose-tools">
-              <button type="button" className="compose-icon" disabled title="Attachments are not available.">
-                <PaperclipMark />
-              </button>
-              <button type="button" className="compose-icon" disabled title="Voice input is not available.">
-                <MicMark />
-              </button>
+      {jumpVisible ? (
+        <button
+          type="button"
+          className="jump-latest"
+          onClick={() => {
+            follow.current = true
+            const node = scroller.current
+            if (node) node.scrollTop = node.scrollHeight
+            setJumpVisible(false)
+          }}
+        >
+          Jump to latest
+        </button>
+      ) : null}
+
+      <ChangesBar
+        changes={changes}
+        expanded={changesOpen}
+        onToggle={() => setChangesOpen((value) => !value)}
+        onKeepAll={onKeepAll}
+        onUndoAll={onUndoAll}
+        onReview={() => {
+          setChangesOpen(true)
+          const first = changes[0]
+          if (first) void openReview(first.id)
+        }}
+        onReviewOne={(changeId) => void openReview(changeId)}
+      />
+
+      {reviewOpen && review ? (
+        <section className="change-review" data-change-review>
+          <header>
+            <div>
+              <strong>{review.relativePath}</strong>
+              <span className="muted">
+                {review.changeType}
+                {review.hasReverse ? ' · reverse available' : ''}
+              </span>
             </div>
-            <button
-              type="button"
-              className="send-button"
-              data-action="agent-send"
-              disabled={!sendEnabled}
-              title={providerReady ? 'Send mission' : 'Store a BharatCode API key in Settings.'}
-              onClick={submitDraft}
-            >
-              <span>Send</span>
-              <EnterMark />
+            <button type="button" className="text-button" onClick={() => setReviewOpen(false)}>
+              Close
+            </button>
+          </header>
+          {review.error ? <p className="hint">{review.error}</p> : null}
+          <pre className="proposal-diff">
+            {review.unifiedDiff.split('\n').map((line, index) => (
+              <span
+                key={`${review.id}-${index}`}
+                className={
+                  line.startsWith('+') && !line.startsWith('+++')
+                    ? 'diff-add'
+                    : line.startsWith('-') && !line.startsWith('---')
+                      ? 'diff-del'
+                      : line.startsWith('@@')
+                        ? 'diff-hunk'
+                        : undefined
+                }
+              >
+                {line}
+                {'\n'}
+              </span>
+            ))}
+          </pre>
+        </section>
+      ) : null}
+
+      {publishSuggestion ? (
+        <div className="agent-suggestion-card">
+          <p>{publishSuggestion.message}</p>
+          <div className="settings-actions">
+            <button type="button" className="text-button" onClick={publishSuggestion.onOpen}>
+              Publish…
+            </button>
+            <button type="button" className="text-button" onClick={publishSuggestion.onDismiss}>
+              Dismiss
             </button>
           </div>
         </div>
-        <div className="compose-actions">
-          <button type="button" className="text-button" disabled title="No test runner is connected.">
-            Run test
-          </button>
-          <button type="button" className="text-button" disabled title="Pause is not available.">
-            Pause
-          </button>
-          <button type="button" className="text-button" data-action="agent-cancel" onClick={onCancel} disabled={!canCancel(running, mission?.status ?? null)}>
-            Cancel
-          </button>
-        </div>
-      </div>
+      ) : null}
+
+      <Composer
+        draft={draft}
+        onDraftChange={setDraft}
+        running={running}
+        workspaceOpen={workspaceOpen}
+        providerReady={providerReady}
+        providerDetail={providerDetail}
+        providerId={providerId}
+        missionStatus={mission?.status ?? null}
+        contextPaths={contextPaths}
+        onSubmit={submitDraft}
+        onCancel={onCancel}
+        onProviderChange={onProviderChange}
+      />
     </aside>
   )
 }
 
-function ProposalCard({
-  operation,
-  onApprove,
-  onReject
-}: {
-  operation: AgentOperationSummary
-  onApprove: (operationId: string) => void
-  onReject: (operationId: string) => void
-}) {
-  const stats = diffStats(operation.unifiedDiff)
-  return (
-    <article
-      className={operation.destructive ? 'proposal-card is-destructive' : 'proposal-card'}
-      data-proposal={operation.id}
-      data-proposal-status={operation.status}
-      data-proposals
-    >
-      <div className="proposal-head">
-        <div className="proposal-path">
-          <Icon name="file" />
-          <span>
-            {operation.path}
-            {operation.toPath ? ` → ${operation.toPath}` : ''}
-          </span>
-        </div>
-        <span className="proposal-stats">
-          {stats.additions > 0 ? `+${stats.additions}` : '+0'}
-          {stats.deletions > 0 ? ` -${stats.deletions}` : ' -0'}
-        </span>
-      </div>
-      <div className="proposal-meta">
-        <span>
-          {operation.kind}
-          {operation.destructive ? ' · destructive' : ''}
-        </span>
-        <span>{operation.status}</span>
-      </div>
-      <p className="proposal-explain">{operation.explanation}</p>
-      {operation.error ? <p className="hint">{operation.error}</p> : null}
-      <pre className="proposal-diff" data-proposal-diff={operation.id}>
-        {operation.unifiedDiff.split('\n').map((line, index) => (
-          <span
-            key={`${operation.id}-${index}`}
-            className={
-              line.startsWith('+') && !line.startsWith('+++')
-                ? 'diff-add'
-                : line.startsWith('-') && !line.startsWith('---')
-                  ? 'diff-del'
-                  : line.startsWith('@@')
-                    ? 'diff-hunk'
-                    : undefined
-            }
-          >
-            {line}
-            {'\n'}
-          </span>
-        ))}
-      </pre>
-      {operation.status === 'pending' ? (
-        <div className="proposal-actions">
-          <button type="button" className="proposal-reject" data-action="agent-reject" onClick={() => onReject(operation.id)}>
-            <Icon name="close" />
-            Reject
-          </button>
-          <button type="button" className="proposal-accept" data-action="agent-approve" onClick={() => onApprove(operation.id)}>
-            <Icon name="check" />
-            Accept Diff
-          </button>
-        </div>
-      ) : null}
-    </article>
-  )
-}
-
-function liveDetail(tool: AgentToolRecord | undefined, responding: boolean, notice: string): string {
-  if (notice) {
-    return notice
-  }
-  if (tool && (tool.state === 'started' || tool.state === 'finished')) {
-    return tool.argumentsText ? `${tool.name} ${shortArgs(tool.argumentsText)}` : tool.name
-  }
-  return responding ? 'Waiting for the model response.' : 'Mission is running.'
-}
-
-function shortArgs(argumentsText: string): string {
-  try {
-    const parsed = JSON.parse(argumentsText) as Record<string, unknown>
-    if (typeof parsed.path === 'string') {
-      return parsed.path
-    }
-    if (typeof parsed.query === 'string') {
-      return parsed.query
-    }
-  } catch {
-    return argumentsText.slice(0, 80)
-  }
-  return argumentsText.slice(0, 80)
-}
-
-function pinLabel(argumentsText: string): string {
-  try {
-    const parsed = JSON.parse(argumentsText) as { path?: unknown }
-    if (typeof parsed.path === 'string') {
-      return parsed.path
-    }
-  } catch {
-    return argumentsText
-  }
-  return argumentsText
-}
-
-function diffStats(diff: string): { additions: number; deletions: number } {
-  let additions = 0
-  let deletions = 0
-  for (const line of diff.split('\n')) {
-    if (line.startsWith('+') && !line.startsWith('+++')) {
-      additions += 1
-    } else if (line.startsWith('-') && !line.startsWith('---')) {
-      deletions += 1
-    }
-  }
-  return { additions, deletions }
-}
-
-function SparkMark() {
-  return (
-    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-      <path
-        d="M8 1.5 9.2 5.8 13.5 7 9.2 8.2 8 12.5 6.8 8.2 2.5 7l4.3-1.2L8 1.5Z"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
-}
-
-function UserMark() {
-  return (
-    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-      <circle cx="8" cy="5.2" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M3.2 13c.6-2.4 2.2-3.6 4.8-3.6s4.2 1.2 4.8 3.6" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function PaperclipMark() {
-  return (
-    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-      <path
-        d="M9.2 3.6 4.4 8.4a2.5 2.5 0 0 0 3.5 3.5l5.2-5.2a1.7 1.7 0 0 0-2.4-2.4L5.6 9.4"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinecap="round"
-      />
-    </svg>
-  )
-}
-
-function MicMark() {
-  return (
-    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-      <rect x="6" y="2.2" width="4" height="7" rx="2" fill="none" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M4.2 8.2a3.8 3.8 0 0 0 7.6 0M8 12v1.8" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function EnterMark() {
-  return (
-    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
-      <path d="M3.2 4.2h7.2v5.2H5.2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-      <path d="M6.8 7.2 5 9.2l1.8 2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  )
+function countDeleteTargets(diff: string): number {
+  const files = /Files:\s*(\d+)/i.exec(diff)
+  if (files) return Number(files[1])
+  return 1
 }
 
 function TraceState({ state }: { state: AgentToolRecord['state'] }) {
-  if (state === 'started') {
+  if (state === 'awaiting_approval' || state === 'started') {
     return <span className="agent-spin trace-mark" />
   }
-  if (state === 'finished') {
+  if (state === 'success' || state === 'finished') {
     return <Icon name="check" className="trace-mark is-done" />
   }
   return <span className="trace-mark is-rejected" aria-hidden="true" />
-}
-
-function MessageBody({ text }: { text: string }) {
-  return (
-    <div className="thread-body">
-      {messageBlocks(text).map((block, index) =>
-        block.kind === 'code' ? (
-          <pre key={index} className="thread-code">
-            {block.text}
-          </pre>
-        ) : (
-          <p key={index} className="thread-copy">
-            {inlineParts(block.text).map((part, partIndex) =>
-              part.code ? <code key={partIndex}>{part.text}</code> : <span key={partIndex}>{part.text}</span>
-            )}
-          </p>
-        )
-      )}
-    </div>
-  )
 }

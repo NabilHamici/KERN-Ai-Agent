@@ -6,10 +6,16 @@ import { createCursorSdkBridge, cursorUsesStoredLogin } from './agent/cursorSdk.
 import { readProviderId } from './agent/providerSettings.ts'
 import { AgentRuntime } from './agent/runtime.ts'
 import { IpcChannel } from '../shared/ipc.ts'
+import { workspaceChangedEventSchema } from '../shared/workspaceEvents.ts'
+import { metricsSampleSchema } from '../shared/metrics.ts'
+import { AuthSessionService } from './services/authSession.ts'
+import { AuditLog } from './services/auditLog.ts'
 import { MissionDatabase } from './services/database.ts'
+import { MetricsService } from './services/metricsService.ts'
 import { readSecret } from './services/secrets.ts'
 import { TerminalService } from './services/terminal.ts'
 import { WorkspaceService } from './services/workspace.ts'
+import { WorkspaceWatcher } from './services/workspaceWatcher.ts'
 import { runAcceptance } from './acceptance.ts'
 
 const acceptancePhase = process.env.KERN_ACCEPTANCE
@@ -23,13 +29,13 @@ let mainWindow: BrowserWindow | null = null
 let database: MissionDatabase | null = null
 let terminal: TerminalService | null = null
 let agent: AgentRuntime | null = null
+let watcher: WorkspaceWatcher | null = null
+let metrics: MetricsService | null = null
 
 function contentSecurityPolicy(): string {
   const rendererUrl = process.env.ELECTRON_RENDERER_URL
   if (rendererUrl) {
     const origin = new URL(rendererUrl).origin
-    // The dev server injects Vite's React refresh preamble as an inline module.
-    // Production bundles have no inline scripts, so script-src stays 'self' there.
     return [
       `default-src 'self' ${origin}`,
       `script-src 'self' 'unsafe-inline' ${origin}`,
@@ -64,6 +70,11 @@ function installSessionGuards(): void {
   })
 }
 
+function sendValidated(channel: string, payload: unknown): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.webContents.send(channel, payload)
+}
+
 async function createWindow(): Promise<void> {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -87,6 +98,9 @@ async function createWindow(): Promise<void> {
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
   })
+
+  mainWindow.on('focus', () => metrics?.setFocused(true))
+  mainWindow.on('blur', () => metrics?.setFocused(false))
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   mainWindow.webContents.on('will-navigate', (event) => {
@@ -118,6 +132,22 @@ void app.whenReady().then(async () => {
   const workspace = new WorkspaceService(db)
   terminal = new TerminalService()
   const userData = app.getPath('userData')
+  const audit = new AuditLog(userData)
+
+  metrics = new MetricsService((sample) => {
+    const parsed = metricsSampleSchema.safeParse(sample)
+    if (parsed.success) {
+      sendValidated(IpcChannel.metricsSample, parsed.data)
+    }
+  })
+
+  watcher = new WorkspaceWatcher((event) => {
+    const parsed = workspaceChangedEventSchema.safeParse(event)
+    if (parsed.success) {
+      sendValidated(IpcChannel.workspaceChanged, parsed.data)
+    }
+  })
+
   const runtime = new AgentRuntime({
     database: db,
     workspace,
@@ -132,22 +162,50 @@ void app.whenReady().then(async () => {
       cursor: createCursorSdkBridge(path.join(userData, 'cursor-runtime'))
     }),
     emit: (event) => {
-      mainWindow?.webContents.send(IpcChannel.agentEvent, event)
-    }
+      sendValidated(IpcChannel.agentEvent, event)
+    },
+    onCommandSpawn: (pid) => {
+      metrics?.trackCommandPid(pid)
+    },
+    onCommandFinished: (cwdRelative) => {
+      watcher?.notifyRefresh([cwdRelative || '.', '.'], 'command')
+    },
+    onMutationApplied: (paths) => {
+      watcher?.suppress(350)
+      watcher?.notifyRefresh(paths.length > 0 ? paths : ['.'], 'mutation')
+    },
+    onStreamChars: (chars) => metrics?.recordStreamChars(chars),
+    onTokenUsage: (usage) => metrics?.recordTokenUsage(usage)
   })
   agent = runtime
+  const auth = new AuthSessionService(userData)
+  const authState = await auth.bootstrap()
   if (acceptance && process.env.KERN_ACCEPTANCE_WORKSPACE) {
     workspace.open(process.env.KERN_ACCEPTANCE_WORKSPACE)
-  } else {
+  } else if (authState.status === 'authenticated') {
     workspace.restore()
   }
+  const current = workspace.current()
+  if (current) {
+    watcher.start(current.path)
+  }
+
   registerIpc({
     getWindow: () => mainWindow,
     workspace,
     terminal,
     agent: runtime,
     database: db,
-    userData: app.getPath('userData')
+    userData: app.getPath('userData'),
+    auth,
+    watcher,
+    metrics,
+    audit,
+    onWorkspaceOpened: (root) => {
+      watcher?.start(root)
+      const pid = terminal?.pid()
+      if (pid) metrics?.trackTerminalPid(pid)
+    }
   })
   await createWindow()
   if (acceptance && mainWindow) {
@@ -167,6 +225,8 @@ void app.whenReady().then(async () => {
 app.on('before-quit', () => {
   agent?.stopAll()
   terminal?.cancel()
+  watcher?.stop()
+  metrics?.dispose()
   database?.close()
 })
 

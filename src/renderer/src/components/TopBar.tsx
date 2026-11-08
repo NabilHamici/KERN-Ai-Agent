@@ -1,4 +1,5 @@
 import type { RefObject } from 'react'
+import kernLogo from '../assets/kern-logo.svg'
 import { Icon } from './Icons'
 
 type TopBarProps = {
@@ -12,9 +13,14 @@ type TopBarProps = {
   secretConfigured: boolean
   providerName: string
   providerLabel: string
+  providerTitle: string
   providerState: string
   missionTitle: string
   missionLive: boolean
+  gitLabel: string
+  gitTitle: string
+  gitDisabled?: boolean
+  onGitClick?: () => void
   onQuery: (value: string) => void
   onOpenFolder: () => void
   onOpenSettings: () => void
@@ -31,9 +37,14 @@ export function TopBar({
   secretConfigured,
   providerName,
   providerLabel,
+  providerTitle,
   providerState,
   missionTitle,
   missionLive,
+  gitLabel,
+  gitTitle,
+  gitDisabled = true,
+  onGitClick,
   onQuery,
   onOpenFolder,
   onOpenSettings
@@ -46,7 +57,7 @@ export function TopBar({
       <div className="cluster">
         <div className="brand-lockup">
           <span className="logo">
-            <Icon name="mark" />
+            <img src={kernLogo} alt="" className="logo-mark" width={24} height={24} />
           </span>
           <span className="wordmark">KERN</span>
         </div>
@@ -92,7 +103,7 @@ export function TopBar({
         <div
           className="model-badge"
           data-provider={providerState}
-          title={providerLabel}
+          title={providerTitle}
         >
           <Icon name="zap" className="tone-amber" />
           <span>{providerName}</span>
@@ -105,11 +116,12 @@ export function TopBar({
         <button
           type="button"
           className="branch-chip"
-          disabled
-          title="Git status needs a workspace-scoped Git reader in the main process. That channel does not exist yet."
+          disabled={gitDisabled}
+          title={gitTitle}
+          onClick={onGitClick}
         >
           <Icon name="branch" className="tone-violet" />
-          Git unavailable
+          {gitLabel}
         </button>
         <button type="button" className="icon-hit" data-action="settings" onClick={onOpenSettings} title="Settings">
           <Icon name="settings" />

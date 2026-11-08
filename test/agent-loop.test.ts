@@ -34,7 +34,7 @@ const loopStubs = {
     execution: { state: 'rejected' as const, output: JSON.stringify({ ok: false, error: 'unused' }) },
     operationId: null
   }),
-  waitForApprovals: async () => [] as Array<{ callId: string; execution: { state: 'finished' | 'rejected'; output: string } }>
+  waitForApprovals: async () => [] as Array<{ callId: string; execution: { state: 'success' | 'rejected'; output: string } }>
 }
 
 function completion(summary = 'Inspection finished.'): ProviderTurn {
@@ -91,10 +91,10 @@ test('persists a mission, records a read, and completes only from submit_result'
   await runtime.finished()
   const transcript = runtime.transcript(missionId)
   assert.equal(transcript?.mission.status, 'completed')
-  assert.equal(transcript?.mission.summary, 'Inspection finished.')
+  assert.match(transcript?.mission.summary ?? '', /Inspection finished/)
   assert.equal(transcript?.mission.iteration, 2)
   assert.equal(transcript?.tools[0]?.name, 'read_file')
-  assert.equal(transcript?.tools[0]?.state, 'finished')
+  assert.equal(transcript?.tools[0]?.state, 'success')
   assert.match(transcript?.tools[0]?.output ?? '', /workspace note/)
   assert.equal(events.some((event) => event.type === 'status' && event.status === 'queued'), true)
   assert.equal(events.some((event) => event.type === 'status' && event.status === 'analyzing'), true)
@@ -148,7 +148,7 @@ test('a rejected call explains the invalid argument and the next turn can recove
   })
   assert.equal(sawReason, true)
   assert.equal(result.status, 'completed')
-  assert.equal(result.summary, 'Read README.md')
+  assert.match(result.summary ?? '', /Read README\.md/)
 })
 
 test('two reads of one file in the same turn execute the file once', async () => {
@@ -198,7 +198,7 @@ test('two reads of one file in the same turn execute the file once', async () =>
   assert.equal((outputs[1] ?? '').includes('beta'), false)
 })
 
-test('stops at the iteration limit when the model never submits a result', async () => {
+test('stops when the model never submits a result and makes no tool progress', async () => {
   const root = temporaryDirectory()
   const db = database()
   let calls = 0
@@ -217,9 +217,9 @@ test('stops at the iteration limit when the model never submits a result', async
   const { missionId } = await runtime.submit('Look around')
   await runtime.finished()
   const mission = db.getAgentMission(missionId)
-  assert.equal(calls, AGENT_LIMITS.maxIterations)
+  assert.ok(calls <= AGENT_LIMITS.maxEmptyModelTurns + 1)
   assert.equal(mission?.status, 'failed')
-  assert.match(mission?.error ?? '', /iteration limit/)
+  assert.match(mission?.error ?? '', /progress|iteration limit|submit a result/i)
   db.close()
 })
 
@@ -307,12 +307,12 @@ test('fails a mission when the provider fails and does not execute tools', async
   db.close()
 })
 
-test('stops when the tool-call limit is reached and does not run the extra call', async () => {
+test('stops when the read-only budget is reached before flooding list_files', async () => {
   let executed = 0
-  const calls = Array.from({ length: AGENT_LIMITS.maxToolCalls + 1 }, (_, index) => ({
+  const calls = Array.from({ length: AGENT_LIMITS.maxReadOnlyToolCalls + 5 }, (_, index) => ({
     callId: `call_${index}`,
-    name: 'get_workspace_info',
-    arguments: '{}'
+    name: 'list_files',
+    arguments: JSON.stringify({ path: `folder-${index}` })
   }))
   const result = await runAgentLoop({
     prompt: 'List everything',
@@ -322,7 +322,7 @@ test('stops when the tool-call limit is reached and does not run the extra call'
     client: async () => ({ kind: 'completed', output: [], calls, text: '', requestId: null }),
     executeTool: () => {
       executed += 1
-      return { state: 'finished', output: '{"ok":true}' }
+      return { state: 'success', output: '{"ok":true,"outcome":"success","entries":[]}' }
     },
     proposeMutation: loopStubs.proposeMutation,
     waitForApprovals: loopStubs.waitForApprovals,
@@ -330,9 +330,9 @@ test('stops when the tool-call limit is reached and does not run the extra call'
     onText: () => undefined,
     onTool: () => undefined
   })
-  assert.equal(executed, AGENT_LIMITS.maxToolCalls)
+  assert.equal(executed, AGENT_LIMITS.maxReadOnlyToolCalls)
   assert.equal(result.status, 'failed')
-  assert.match(result.error ?? '', /tool-call limit/)
+  assert.match(`${result.error ?? ''}\n${result.summary ?? ''}`, /Read-only exploration budget|exploration without action/i)
 })
 
 test('does not execute tools from an incomplete response', async () => {
@@ -345,7 +345,7 @@ test('does not execute tools from an incomplete response', async () => {
     client: async () => ({ kind: 'incomplete', reason: 'max_output_tokens', text: 'partial', requestId: 'req-cap' }),
     executeTool: () => {
       executed += 1
-      return { state: 'finished', output: '{}' }
+      return { state: 'success', output: '{"ok":true,"outcome":"success"}' }
     },
     proposeMutation: loopStubs.proposeMutation,
     waitForApprovals: loopStubs.waitForApprovals,

@@ -1,0 +1,55 @@
+{
+  "name": "@kern/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "KERN self-hosted cloud backend foundation",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:studio": "drizzle-kit studio",
+    "smtp:verify": "tsx src/modules/email/verify-cli.ts"
+  },
+  "dependencies": {
+    "argon2": "^0.45.2",
+    "cors": "^2.8.5",
+    "drizzle-orm": "^0.44.5",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.1.0",
+    "helmet": "^8.1.0",
+    "jose": "^6.2.15",
+    "nodemailer": "^7.0.6",
+    "pg": "^8.16.3",
+    "pino": "^9.9.4",
+    "pino-http": "^10.5.0",
+    "zod": "^4.6.7"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "devDependencies": {
+    "@types/argon2": "^0.15.4",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.19.2",
+    "@types/nodemailer": "^7.0.1",
+    "@types/pg": "^8.15.5",
+    "@types/supertest": "^6.0.3",
+    "drizzle-kit": "^0.31.4",
+    "supertest": "^7.1.4",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

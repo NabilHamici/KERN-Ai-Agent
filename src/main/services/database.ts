@@ -4,14 +4,19 @@ import crypto from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import {
   canTransition,
+  chatTitleFromPrompt,
   isMissionStatus,
   missionTitle,
+  normalizeToolExecutionState,
+  type AgentChatSummary,
+  type AgentChatTranscript,
   type AgentMissionSummary,
   type AgentOperationSummary,
   type AgentTranscript,
   type MissionStatus,
   type OperationKind,
-  type OperationStatus
+  type OperationStatus,
+  type ToolExecutionState
 } from '../../shared/agent.ts'
 import type { FileChangeRecord, MissionRecord } from '../../shared/ipc.ts'
 
@@ -103,7 +108,42 @@ const MIGRATIONS = [
       file_change_id TEXT,
       created_at TEXT NOT NULL,
       resolved_at TEXT
-    )`
+    )`,
+  `ALTER TABLE agent_operations ADD COLUMN source_operation_id TEXT`,
+  `ALTER TABLE file_changes ADD COLUMN review_status TEXT NOT NULL DEFAULT 'open'`,
+  `ALTER TABLE file_changes ADD COLUMN applied_hash TEXT`,
+  `CREATE TABLE agent_chats (
+      id TEXT PRIMARY KEY,
+      workspace_path TEXT NOT NULL,
+      title TEXT NOT NULL,
+      title_locked INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      archived_at TEXT
+    )`,
+  `CREATE INDEX agent_chats_workspace_updated ON agent_chats (workspace_path, updated_at DESC)`,
+  `ALTER TABLE agent_missions ADD COLUMN chat_id TEXT`,
+  `CREATE INDEX agent_missions_chat_created ON agent_missions (chat_id, created_at ASC)`,
+  `ALTER TABLE file_changes ADD COLUMN chat_id TEXT`,
+  `CREATE INDEX file_changes_chat_status ON file_changes (chat_id, review_status, created_at DESC)`,
+  `CREATE TABLE agent_commands (
+      id TEXT PRIMARY KEY,
+      mission_id TEXT NOT NULL,
+      call_id TEXT NOT NULL,
+      command TEXT NOT NULL,
+      args TEXT NOT NULL,
+      working_directory TEXT NOT NULL,
+      explanation TEXT NOT NULL,
+      status TEXT NOT NULL,
+      exit_code INTEGER,
+      stdout TEXT,
+      stderr TEXT,
+      error TEXT,
+      started_at TEXT,
+      finished_at TEXT,
+      created_at TEXT NOT NULL
+    )`,
+  `CREATE INDEX agent_commands_mission_created ON agent_commands (mission_id, created_at ASC)`
 ]
 
 export class MissionDatabase {
@@ -136,6 +176,71 @@ export class MissionDatabase {
         throw error
       }
     }
+    this.ensureLegacyChats()
+  }
+
+  /** One legacy chat per existing mission that has no chat_id. Never merges unrelated missions. */
+  private ensureLegacyChats(): void {
+    const rows = this.db
+      .prepare(
+        `SELECT id, workspace_path, title, prompt, created_at, updated_at
+         FROM agent_missions
+         WHERE chat_id IS NULL
+         ORDER BY created_at ASC`
+      )
+      .all() as Array<{
+      id: string
+      workspace_path: string
+      title: string
+      prompt: string
+      created_at: string
+      updated_at: string
+    }>
+    if (rows.length > 0) {
+      this.db.exec('BEGIN IMMEDIATE')
+      try {
+        const insert = this.db.prepare(
+          `INSERT INTO agent_chats (id, workspace_path, title, title_locked, created_at, updated_at, archived_at)
+           VALUES (?, ?, ?, 0, ?, ?, NULL)`
+        )
+        const link = this.db.prepare('UPDATE agent_missions SET chat_id = ? WHERE id = ? AND chat_id IS NULL')
+        for (const row of rows) {
+          const chatId = crypto.randomUUID()
+          insert.run(chatId, row.workspace_path, chatTitleFromPrompt(row.prompt || row.title), row.created_at, row.updated_at)
+          link.run(chatId, row.id)
+        }
+        this.db.exec('COMMIT')
+      } catch (error) {
+        this.db.exec('ROLLBACK')
+        throw error
+      }
+    }
+    this.backfillFileChangeChats()
+  }
+
+  /** Attach orphan file_changes to chats via agent_operations → agent_missions when possible. */
+  private backfillFileChangeChats(): void {
+    this.db
+      .prepare(
+        `UPDATE file_changes
+         SET chat_id = (
+           SELECT agent_missions.chat_id
+           FROM agent_operations
+           JOIN agent_missions ON agent_missions.id = agent_operations.mission_id
+           WHERE agent_operations.file_change_id = file_changes.id
+             AND agent_missions.chat_id IS NOT NULL
+           LIMIT 1
+         )
+         WHERE chat_id IS NULL
+           AND EXISTS (
+             SELECT 1
+             FROM agent_operations
+             JOIN agent_missions ON agent_missions.id = agent_operations.mission_id
+             WHERE agent_operations.file_change_id = file_changes.id
+               AND agent_missions.chat_id IS NOT NULL
+           )`
+      )
+      .run()
   }
 
   private currentVersion(): number {
@@ -203,17 +308,29 @@ export class MissionDatabase {
 
   recordFileChange(input: {
     missionId: string | null
+    chatId?: string | null
     relativePath: string
     changeType: string
     reverseText: string | null
+    appliedHash?: string | null
   }): string {
     const id = crypto.randomUUID()
     this.db
       .prepare(
-        `INSERT INTO file_changes (id, mission_id, relative_path, change_type, reverse_text, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
+        `INSERT INTO file_changes (
+           id, mission_id, relative_path, change_type, reverse_text, created_at, review_status, applied_hash, chat_id
+         ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)`
       )
-      .run(id, input.missionId, input.relativePath, input.changeType, input.reverseText, new Date().toISOString())
+      .run(
+        id,
+        input.missionId,
+        input.relativePath,
+        input.changeType,
+        input.reverseText,
+        new Date().toISOString(),
+        input.appliedHash ?? null,
+        input.chatId ?? null
+      )
     if (input.missionId) {
       this.addEvent(input.missionId, 'file', `${input.changeType} ${input.relativePath}`)
     }
@@ -244,34 +361,215 @@ export class MissionDatabase {
     }))
   }
 
-  listFileChanges(limit = 50): FileChangeRecord[] {
-    const rows = this.db
-      .prepare(
-        `SELECT id, mission_id, relative_path, change_type, reverse_text, created_at
-         FROM file_changes ORDER BY created_at DESC LIMIT ?`
-      )
-      .all(limit) as Array<{
-      id: string
-      mission_id: string | null
-      relative_path: string
-      change_type: string
-      reverse_text: string | null
-      created_at: string
-    }>
-    return rows.map((row) => ({
-      id: row.id,
-      missionId: row.mission_id,
-      relativePath: row.relative_path,
-      changeType: row.change_type,
-      createdAt: row.created_at,
-      hasReverse: row.reverse_text !== null
-    }))
+  listFileChanges(
+    limit = 50,
+    status: 'open' | 'kept' | 'undone' | 'all' = 'open',
+    chatId?: string | null
+  ): FileChangeRecord[] {
+    if (chatId) {
+      const rows =
+        status === 'all'
+          ? (this.db
+              .prepare(
+                `SELECT id, mission_id, relative_path, change_type, reverse_text, created_at, review_status, applied_hash, chat_id
+                 FROM file_changes WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?`
+              )
+              .all(chatId, limit) as FileChangeRow[])
+          : (this.db
+              .prepare(
+                `SELECT id, mission_id, relative_path, change_type, reverse_text, created_at, review_status, applied_hash, chat_id
+                 FROM file_changes WHERE chat_id = ? AND review_status = ? ORDER BY created_at DESC LIMIT ?`
+              )
+              .all(chatId, status, limit) as FileChangeRow[])
+      return rows.map(mapFileChange)
+    }
+    const rows =
+      status === 'all'
+        ? (this.db
+            .prepare(
+              `SELECT id, mission_id, relative_path, change_type, reverse_text, created_at, review_status, applied_hash, chat_id
+               FROM file_changes ORDER BY created_at DESC LIMIT ?`
+            )
+            .all(limit) as FileChangeRow[])
+        : (this.db
+            .prepare(
+              `SELECT id, mission_id, relative_path, change_type, reverse_text, created_at, review_status, applied_hash, chat_id
+               FROM file_changes WHERE review_status = ? ORDER BY created_at DESC LIMIT ?`
+            )
+            .all(status, limit) as FileChangeRow[])
+    return rows.map(mapFileChange)
   }
 
-  createAgentMission(workspacePath: string, prompt: string): AgentMissionSummary {
+  getFileChangeRecord(id: string): FileChangeDetailRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, mission_id, relative_path, change_type, reverse_text, created_at, review_status, applied_hash
+         FROM file_changes WHERE id = ?`
+      )
+      .get(id) as FileChangeRow | undefined
+    return row ? mapFileChangeDetail(row) : null
+  }
+
+  markFileChangesReviewStatus(ids: string[], status: 'kept' | 'undone' | 'open'): number {
+    if (ids.length === 0) {
+      return 0
+    }
+    const statement = this.db.prepare(
+      `UPDATE file_changes SET review_status = ? WHERE id = ? AND review_status = 'open'`
+    )
+    let changed = 0
+    for (const id of ids) {
+      const result = statement.run(status, id)
+      changed += Number(result.changes ?? 0)
+    }
+    return changed
+  }
+
+  createAgentChat(workspacePath: string, title = 'New chat'): AgentChatSummary {
+    const now = new Date().toISOString()
+    const chat: AgentChatSummary = {
+      id: crypto.randomUUID(),
+      workspacePath,
+      title: chatTitleFromPrompt(title),
+      titleLocked: false,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+      latestMissionStatus: null
+    }
+    this.db
+      .prepare(
+        `INSERT INTO agent_chats (id, workspace_path, title, title_locked, created_at, updated_at, archived_at)
+         VALUES (?, ?, ?, 0, ?, ?, NULL)`
+      )
+      .run(chat.id, workspacePath, chat.title, chat.createdAt, chat.updatedAt)
+    return chat
+  }
+
+  getAgentChat(id: string): AgentChatSummary | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, workspace_path, title, title_locked, created_at, updated_at, archived_at
+         FROM agent_chats WHERE id = ?`
+      )
+      .get(id) as AgentChatRow | undefined
+    return row ? this.mapAgentChat(row) : null
+  }
+
+  listAgentChatsForWorkspace(workspacePath: string, limit = 40): AgentChatSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, workspace_path, title, title_locked, created_at, updated_at, archived_at
+         FROM agent_chats
+         WHERE workspace_path = ? AND archived_at IS NULL
+         ORDER BY updated_at DESC
+         LIMIT ?`
+      )
+      .all(workspacePath, limit) as AgentChatRow[]
+    return rows.map((row) => this.mapAgentChat(row))
+  }
+
+  latestAgentChat(workspacePath: string): AgentChatSummary | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, workspace_path, title, title_locked, created_at, updated_at, archived_at
+         FROM agent_chats
+         WHERE workspace_path = ? AND archived_at IS NULL
+         ORDER BY updated_at DESC
+         LIMIT 1`
+      )
+      .get(workspacePath) as AgentChatRow | undefined
+    return row ? this.mapAgentChat(row) : null
+  }
+
+  agentChatBelongsToWorkspace(chatId: string, workspacePath: string): boolean {
+    const row = this.db
+      .prepare('SELECT 1 AS ok FROM agent_chats WHERE id = ? AND workspace_path = ?')
+      .get(chatId, workspacePath) as { ok: number } | undefined
+    return Boolean(row)
+  }
+
+  touchAgentChat(chatId: string): void {
+    this.db.prepare('UPDATE agent_chats SET updated_at = ? WHERE id = ?').run(new Date().toISOString(), chatId)
+  }
+
+  renameAgentChat(chatId: string, title: string): AgentChatSummary | null {
+    const current = this.getAgentChat(chatId)
+    if (!current || current.archivedAt) {
+      return null
+    }
+    const next = chatTitleFromPrompt(title)
+    this.db
+      .prepare('UPDATE agent_chats SET title = ?, title_locked = 1, updated_at = ? WHERE id = ?')
+      .run(next, new Date().toISOString(), chatId)
+    return this.getAgentChat(chatId)
+  }
+
+  archiveAgentChat(chatId: string): AgentChatSummary | null {
+    const current = this.getAgentChat(chatId)
+    if (!current) {
+      return null
+    }
+    if (current.archivedAt) {
+      return current
+    }
+    const now = new Date().toISOString()
+    this.db.prepare('UPDATE agent_chats SET archived_at = ?, updated_at = ? WHERE id = ?').run(now, now, chatId)
+    return this.getAgentChat(chatId)
+  }
+
+  selectedChatSettingKey(workspacePath: string): string {
+    return `selectedChat:${workspacePath}`
+  }
+
+  getSelectedChatId(workspacePath: string): string | null {
+    return this.getSetting(this.selectedChatSettingKey(workspacePath))
+  }
+
+  setSelectedChatId(workspacePath: string, chatId: string | null): void {
+    const key = this.selectedChatSettingKey(workspacePath)
+    if (!chatId) {
+      this.deleteSetting(key)
+      return
+    }
+    this.setSetting(key, chatId)
+  }
+
+  listAgentMissionsForChat(chatId: string): AgentMissionSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, chat_id, title, prompt, status, iteration, tool_calls, summary, error, created_at, updated_at
+         FROM agent_missions WHERE chat_id = ? ORDER BY created_at ASC`
+      )
+      .all(chatId) as AgentMissionRow[]
+    return rows.map(mapAgentMission)
+  }
+
+  agentChatTranscript(chatId: string): AgentChatTranscript | null {
+    const chat = this.getAgentChat(chatId)
+    if (!chat) {
+      return null
+    }
+    const missions = this.listAgentMissionsForChat(chatId)
+    const turns = missions
+      .map((mission) => this.agentTranscript(mission.id))
+      .filter((item): item is AgentTranscript => Boolean(item))
+    return { chat, missions, turns }
+  }
+
+  createAgentMission(workspacePath: string, prompt: string, chatId?: string): AgentMissionSummary {
+    const resolvedChatId = chatId ?? this.createAgentChat(workspacePath, prompt).id
+    const chat = this.getAgentChat(resolvedChatId)
+    if (!chat || chat.workspacePath !== workspacePath) {
+      throw new Error('Chat does not belong to this workspace')
+    }
+    if (chat.archivedAt) {
+      throw new Error('Chat is archived')
+    }
     const now = new Date().toISOString()
     const mission: AgentMissionSummary = {
       id: crypto.randomUUID(),
+      chatId: resolvedChatId,
       title: missionTitle(prompt),
       prompt,
       status: 'queued',
@@ -285,10 +583,26 @@ export class MissionDatabase {
     this.db
       .prepare(
         `INSERT INTO agent_missions (
-           id, workspace_path, title, prompt, status, iteration, tool_calls, summary, error, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, 0, 0, NULL, NULL, ?, ?)`
+           id, workspace_path, title, prompt, status, iteration, tool_calls, summary, error, created_at, updated_at, chat_id
+         ) VALUES (?, ?, ?, ?, ?, 0, 0, NULL, NULL, ?, ?, ?)`
       )
-      .run(mission.id, workspacePath, mission.title, mission.prompt, mission.status, mission.createdAt, mission.updatedAt)
+      .run(
+        mission.id,
+        workspacePath,
+        mission.title,
+        mission.prompt,
+        mission.status,
+        mission.createdAt,
+        mission.updatedAt,
+        resolvedChatId
+      )
+    if (!chat.titleLocked && chat.title === 'New chat') {
+      this.db
+        .prepare('UPDATE agent_chats SET title = ?, updated_at = ? WHERE id = ? AND title_locked = 0')
+        .run(chatTitleFromPrompt(prompt), now, resolvedChatId)
+    } else {
+      this.touchAgentChat(resolvedChatId)
+    }
     this.addAgentEvent(mission.id, 'status', 'queued')
     return mission
   }
@@ -296,7 +610,7 @@ export class MissionDatabase {
   getAgentMission(id: string): AgentMissionSummary | null {
     const row = this.db
       .prepare(
-        `SELECT id, title, prompt, status, iteration, tool_calls, summary, error, created_at, updated_at
+        `SELECT id, chat_id, title, prompt, status, iteration, tool_calls, summary, error, created_at, updated_at
          FROM agent_missions WHERE id = ?`
       )
       .get(id) as AgentMissionRow | undefined
@@ -306,7 +620,7 @@ export class MissionDatabase {
   activeAgentMission(): AgentMissionSummary | null {
     const row = this.db
       .prepare(
-        `SELECT id, title, prompt, status, iteration, tool_calls, summary, error, created_at, updated_at
+        `SELECT id, chat_id, title, prompt, status, iteration, tool_calls, summary, error, created_at, updated_at
          FROM agent_missions
          WHERE status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')
          ORDER BY created_at DESC LIMIT 1`
@@ -318,11 +632,29 @@ export class MissionDatabase {
   listAgentMissions(limit = 20): AgentMissionSummary[] {
     const rows = this.db
       .prepare(
-        `SELECT id, title, prompt, status, iteration, tool_calls, summary, error, created_at, updated_at
+        `SELECT id, chat_id, title, prompt, status, iteration, tool_calls, summary, error, created_at, updated_at
          FROM agent_missions ORDER BY created_at DESC LIMIT ?`
       )
       .all(limit) as AgentMissionRow[]
     return rows.map(mapAgentMission)
+  }
+
+  private mapAgentChat(row: AgentChatRow): AgentChatSummary {
+    const latest = this.db
+      .prepare(
+        `SELECT status FROM agent_missions WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1`
+      )
+      .get(row.id) as { status: string } | undefined
+    return {
+      id: row.id,
+      workspacePath: row.workspace_path,
+      title: row.title,
+      titleLocked: Number(row.title_locked) === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      archivedAt: row.archived_at,
+      latestMissionStatus: latest && isMissionStatus(latest.status) ? latest.status : null
+    }
   }
 
   transitionAgentMission(id: string, status: MissionStatus, patch: { summary: string | null; error: string | null }): boolean {
@@ -338,6 +670,9 @@ export class MissionDatabase {
          WHERE id = ?`
       )
       .run(status, patch.summary, patch.error, now, id)
+    if (current.chatId) {
+      this.touchAgentChat(current.chatId)
+    }
     this.addAgentEvent(id, 'status', status)
     return true
   }
@@ -373,7 +708,7 @@ export class MissionDatabase {
     callId: string
     name: string
     argumentsText: string
-    state: 'started' | 'finished' | 'rejected'
+    state: ToolExecutionState
     output: string
   }): void {
     const now = new Date().toISOString()
@@ -409,6 +744,7 @@ export class MissionDatabase {
     baseHash: string | null
     contentFingerprint: string
     unifiedDiff: string
+    sourceOperationId?: string | null
   }): AgentOperationSummary {
     const now = new Date().toISOString()
     this.db
@@ -416,8 +752,8 @@ export class MissionDatabase {
         `INSERT INTO agent_operations (
            id, mission_id, call_id, kind, path, to_path, explanation,
            original_text, proposed_text, base_hash, applied_hash, content_fingerprint,
-           unified_diff, status, error, file_change_id, created_at, resolved_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'pending', NULL, NULL, ?, NULL)`
+           unified_diff, status, error, file_change_id, created_at, resolved_at, source_operation_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 'pending', NULL, NULL, ?, NULL, ?)`
       )
       .run(
         input.id,
@@ -432,7 +768,8 @@ export class MissionDatabase {
         input.baseHash,
         input.contentFingerprint,
         input.unifiedDiff,
-        now
+        now,
+        input.sourceOperationId ?? null
       )
     this.addAgentEvent(input.missionId, 'operation', `pending ${input.kind} ${input.path}`)
     const created = this.getAgentOperation(input.id)
@@ -463,6 +800,77 @@ export class MissionDatabase {
     const rows = this.db
       .prepare(`SELECT * FROM agent_operations WHERE mission_id = ? AND status = 'pending' ORDER BY created_at ASC`)
       .all(missionId) as AgentOperationRow[]
+    return rows.map(mapAgentOperation)
+  }
+
+  listAgentMissionsForWorkspace(workspacePath: string, limit = 20): AgentMissionSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, chat_id, title, prompt, status, iteration, tool_calls, summary, error, created_at, updated_at
+         FROM agent_missions WHERE workspace_path = ? ORDER BY created_at DESC LIMIT ?`
+      )
+      .all(workspacePath, limit) as AgentMissionRow[]
+    return rows.map(mapAgentMission)
+  }
+
+  agentMissionBelongsToWorkspace(missionId: string, workspacePath: string): boolean {
+    const row = this.db
+      .prepare('SELECT 1 AS ok FROM agent_missions WHERE id = ? AND workspace_path = ?')
+      .get(missionId, workspacePath) as { ok: number } | undefined
+    return Boolean(row)
+  }
+
+  latestAgentMission(workspacePath?: string | null): AgentMissionSummary | null {
+    if (workspacePath) {
+      const row = this.db
+        .prepare(
+          `SELECT id, chat_id, title, prompt, status, iteration, tool_calls, summary, error, created_at, updated_at
+           FROM agent_missions WHERE workspace_path = ? ORDER BY created_at DESC LIMIT 1`
+        )
+        .get(workspacePath) as AgentMissionRow | undefined
+      return row ? mapAgentMission(row) : null
+    }
+    const row = this.db
+      .prepare(
+        `SELECT id, chat_id, title, prompt, status, iteration, tool_calls, summary, error, created_at, updated_at
+         FROM agent_missions ORDER BY created_at DESC LIMIT 1`
+      )
+      .get() as AgentMissionRow | undefined
+    return row ? mapAgentMission(row) : null
+  }
+
+  listWorkspaceOperations(input: {
+    workspacePath: string
+    path?: string
+    kind?: OperationKind
+    status?: OperationStatus
+    limit?: number
+  }): AgentOperationSummary[] {
+    const clauses = ['m.workspace_path = ?']
+    const params: Array<string | number> = [input.workspacePath]
+    if (input.path) {
+      clauses.push('(o.path = ? OR o.to_path = ?)')
+      params.push(input.path, input.path)
+    }
+    if (input.kind) {
+      clauses.push('o.kind = ?')
+      params.push(input.kind)
+    }
+    if (input.status) {
+      clauses.push('o.status = ?')
+      params.push(input.status)
+    }
+    params.push(Math.min(Math.max(input.limit ?? 40, 1), 100))
+    const rows = this.db
+      .prepare(
+        `SELECT o.*
+         FROM agent_operations o
+         INNER JOIN agent_missions m ON m.id = o.mission_id
+         WHERE ${clauses.join(' AND ')}
+         ORDER BY o.created_at DESC
+         LIMIT ?`
+      )
+      .all(...params) as AgentOperationRow[]
     return rows.map(mapAgentOperation)
   }
 
@@ -550,7 +958,7 @@ export class MissionDatabase {
         callId: row.call_id,
         name: row.name,
         argumentsText: row.arguments,
-        state: row.status === 'rejected' ? 'rejected' : row.status === 'started' ? 'started' : 'finished',
+        state: normalizeToolExecutionState(row.status),
         output: row.output,
         createdAt: row.created_at
       })),
@@ -558,8 +966,133 @@ export class MissionDatabase {
     }
   }
 
+  createAgentCommand(input: {
+    id: string
+    missionId: string
+    callId: string
+    command: string
+    args: string[]
+    workingDirectory: string
+    explanation: string
+    status: string
+  }): void {
+    const now = new Date().toISOString()
+    this.db
+      .prepare(
+        `INSERT INTO agent_commands (
+           id, mission_id, call_id, command, args, working_directory, explanation, status, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        input.id,
+        input.missionId,
+        input.callId,
+        input.command,
+        JSON.stringify(input.args),
+        input.workingDirectory,
+        input.explanation,
+        input.status,
+        now
+      )
+    this.addAgentEvent(input.missionId, 'command', `${input.status} ${input.command}`)
+  }
+
+  updateAgentCommand(
+    id: string,
+    patch: {
+      status: string
+      exitCode?: number | null
+      stdout?: string | null
+      stderr?: string | null
+      error?: string | null
+      startedAt?: string | null
+      finishedAt?: string | null
+    }
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE agent_commands
+         SET status = ?,
+             exit_code = COALESCE(?, exit_code),
+             stdout = COALESCE(?, stdout),
+             stderr = COALESCE(?, stderr),
+             error = COALESCE(?, error),
+             started_at = COALESCE(?, started_at),
+             finished_at = COALESCE(?, finished_at)
+         WHERE id = ?`
+      )
+      .run(
+        patch.status,
+        patch.exitCode ?? null,
+        patch.stdout ?? null,
+        patch.stderr ?? null,
+        patch.error ?? null,
+        patch.startedAt ?? null,
+        patch.finishedAt ?? null,
+        id
+      )
+  }
+
+  listAgentCommands(missionId: string): Array<{
+    id: string
+    missionId: string
+    callId: string
+    command: string
+    args: string
+    workingDirectory: string
+    explanation: string
+    status: string
+    exitCode: number | null
+    stdout: string | null
+    stderr: string | null
+    error: string | null
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT id, mission_id, call_id, command, args, working_directory, explanation, status, exit_code, stdout, stderr, error
+         FROM agent_commands WHERE mission_id = ? ORDER BY created_at ASC`
+      )
+      .all(missionId) as Array<{
+      id: string
+      mission_id: string
+      call_id: string
+      command: string
+      args: string
+      working_directory: string
+      explanation: string
+      status: string
+      exit_code: number | null
+      stdout: string | null
+      stderr: string | null
+      error: string | null
+    }>
+    return rows.map((row) => ({
+      id: row.id,
+      missionId: row.mission_id,
+      callId: row.call_id,
+      command: row.command,
+      args: row.args,
+      workingDirectory: row.working_directory,
+      explanation: row.explanation,
+      status: row.status,
+      exitCode: row.exit_code,
+      stdout: row.stdout,
+      stderr: row.stderr,
+      error: row.error
+    }))
+  }
+
   interruptAgentMissions(): number {
     const now = new Date().toISOString()
+    this.db
+      .prepare(
+        `UPDATE agent_commands
+         SET status = 'cancelled',
+             error = COALESCE(error, 'The mission was interrupted because KERN exited.'),
+             finished_at = COALESCE(finished_at, ?)
+         WHERE status IN ('queued', 'running')`
+      )
+      .run(now)
     this.db
       .prepare(
         `UPDATE agent_operations
@@ -590,6 +1123,7 @@ export class MissionDatabase {
 
 type AgentMissionRow = {
   id: string
+  chat_id?: string | null
   title: string
   prompt: string
   status: string
@@ -601,9 +1135,20 @@ type AgentMissionRow = {
   updated_at: string
 }
 
+type AgentChatRow = {
+  id: string
+  workspace_path: string
+  title: string
+  title_locked: number
+  created_at: string
+  updated_at: string
+  archived_at: string | null
+}
+
 function mapAgentMission(row: AgentMissionRow): AgentMissionSummary {
   return {
     id: row.id,
+    chatId: row.chat_id ?? null,
     title: row.title,
     prompt: row.prompt,
     status: isMissionStatus(row.status) ? row.status : 'failed',
@@ -633,6 +1178,7 @@ type AgentOperationRow = {
   status: string
   error: string | null
   file_change_id: string | null
+  source_operation_id?: string | null
   created_at: string
   resolved_at: string | null
 }
@@ -646,7 +1192,7 @@ export type AgentOperationRecord = AgentOperationSummary & {
 }
 
 function isOperationKind(value: string): value is OperationKind {
-  return value === 'create' || value === 'edit' || value === 'delete' || value === 'rename'
+  return value === 'create' || value === 'edit' || value === 'delete' || value === 'rename' || value === 'restore'
 }
 
 function isOperationStatus(value: string): value is OperationStatus {
@@ -673,9 +1219,10 @@ function mapAgentOperation(row: AgentOperationRow): AgentOperationSummary {
     explanation: row.explanation,
     status: isOperationStatus(row.status) ? row.status : 'failed',
     unifiedDiff: row.unified_diff,
-    destructive: kind === 'delete' || kind === 'rename',
+    destructive: kind === 'delete' || kind === 'rename' || kind === 'restore',
     error: row.error,
     contentFingerprint: row.content_fingerprint,
+    sourceOperationId: row.source_operation_id ?? null,
     createdAt: row.created_at,
     resolvedAt: row.resolved_at
   }
@@ -689,5 +1236,47 @@ function mapAgentOperationRecord(row: AgentOperationRow): AgentOperationRecord {
     baseHash: row.base_hash,
     appliedHash: row.applied_hash,
     fileChangeId: row.file_change_id
+  }
+}
+
+type FileChangeRow = {
+  id: string
+  mission_id: string | null
+  relative_path: string
+  change_type: string
+  reverse_text: string | null
+  created_at: string
+  review_status?: string | null
+  applied_hash?: string | null
+  chat_id?: string | null
+}
+
+export type FileChangeDetailRecord = FileChangeRecord & {
+  reverseText: string | null
+  appliedHash: string | null
+}
+
+function mapFileChange(row: FileChangeRow): FileChangeRecord {
+  const reviewStatus =
+    row.review_status === 'kept' || row.review_status === 'undone' || row.review_status === 'open'
+      ? row.review_status
+      : 'open'
+  return {
+    id: row.id,
+    missionId: row.mission_id,
+    chatId: row.chat_id ?? null,
+    relativePath: row.relative_path,
+    changeType: row.change_type,
+    createdAt: row.created_at,
+    hasReverse: row.reverse_text !== null,
+    reviewStatus
+  }
+}
+
+function mapFileChangeDetail(row: FileChangeRow): FileChangeDetailRecord {
+  return {
+    ...mapFileChange(row),
+    reverseText: row.reverse_text,
+    appliedHash: row.applied_hash ?? null
   }
 }

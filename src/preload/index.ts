@@ -5,14 +5,18 @@ import {
   parseRequest,
   terminalDataSchema,
   terminalExitSchema,
+  workspaceChangedEventSchema,
   type IpcResult,
   type RequestChannel
 } from '../shared/ipc.ts'
+import { metricsSampleSchema } from '../shared/metrics.ts'
 
 let nextSubscription = 1
 const dataListeners = new Map<number, (event: IpcRendererEvent, payload: unknown) => void>()
 const exitListeners = new Map<number, (event: IpcRendererEvent, payload: unknown) => void>()
 const agentListeners = new Map<number, (event: IpcRendererEvent, payload: unknown) => void>()
+const metricsListeners = new Map<number, (event: IpcRendererEvent, payload: unknown) => void>()
+const workspaceListeners = new Map<number, (event: IpcRendererEvent, payload: unknown) => void>()
 
 async function invoke<T>(channel: RequestChannel, payload: unknown): Promise<IpcResult<T>> {
   const parsed = parseRequest(channel, payload)
@@ -36,7 +40,27 @@ const kern = {
     createFile: (payload: unknown) => invoke(IpcChannel.workspaceCreateFile, payload),
     createDirectory: (payload: unknown) => invoke(IpcChannel.workspaceCreateDirectory, payload),
     rename: (payload: unknown) => invoke(IpcChannel.workspaceRename, payload),
-    remove: (payload: unknown) => invoke(IpcChannel.workspaceRemove, payload)
+    remove: (payload: unknown) => invoke(IpcChannel.workspaceRemove, payload),
+    onChanged: (callback: (event: import('../shared/workspaceEvents.ts').WorkspaceChangedEvent) => void): number => {
+      const id = nextSubscription++
+      const listener = (_event: IpcRendererEvent, payload: unknown): void => {
+        const parsed = workspaceChangedEventSchema.safeParse(payload)
+        if (parsed.success) {
+          callback(parsed.data)
+        }
+      }
+      workspaceListeners.set(id, listener)
+      ipcRenderer.on(IpcChannel.workspaceChanged, listener)
+      return id
+    },
+    offChanged: (id: number): void => {
+      const listener = workspaceListeners.get(id)
+      if (!listener) {
+        return
+      }
+      workspaceListeners.delete(id)
+      ipcRenderer.removeListener(IpcChannel.workspaceChanged, listener)
+    }
   },
   secrets: {
     status: () => invoke(IpcChannel.secretsStatus, {}),
@@ -98,7 +122,19 @@ const kern = {
   },
   history: {
     missions: (payload: unknown) => invoke(IpcChannel.historyMissions, payload),
-    fileChanges: (payload: unknown) => invoke(IpcChannel.historyFileChanges, payload)
+    fileChanges: (payload: unknown) => invoke(IpcChannel.historyFileChanges, payload),
+    keepFileChanges: (payload: unknown) => invoke(IpcChannel.historyKeepFileChanges, payload),
+    undoFileChanges: (payload: unknown) => invoke(IpcChannel.historyUndoFileChanges, payload),
+    fileChangeReview: (payload: unknown) => invoke(IpcChannel.historyFileChangeReview, payload)
+  },
+  chat: {
+    list: (payload: unknown) => invoke(IpcChannel.chatList, payload),
+    create: () => invoke(IpcChannel.chatCreate, {}),
+    get: (payload: unknown) => invoke(IpcChannel.chatGet, payload),
+    select: (payload: unknown) => invoke(IpcChannel.chatSelect, payload),
+    rename: (payload: unknown) => invoke(IpcChannel.chatRename, payload),
+    archive: (payload: unknown) => invoke(IpcChannel.chatArchive, payload),
+    hydrate: () => invoke(IpcChannel.chatHydrate, {})
   },
   agent: {
     submit: (payload: unknown) => invoke(IpcChannel.agentSubmit, payload),
@@ -129,6 +165,66 @@ const kern = {
       agentListeners.delete(id)
       ipcRenderer.removeListener(IpcChannel.agentEvent, listener)
     }
+  },
+  metrics: {
+    subscribe: (payload: unknown) => invoke(IpcChannel.metricsSubscribe, payload),
+    unsubscribe: () => invoke(IpcChannel.metricsUnsubscribe, {}),
+    onSample: (callback: (sample: import('../shared/metrics.ts').MetricsSample) => void): number => {
+      const id = nextSubscription++
+      const listener = (_event: IpcRendererEvent, payload: unknown): void => {
+        const parsed = metricsSampleSchema.safeParse(payload)
+        if (parsed.success) {
+          callback(parsed.data)
+        }
+      }
+      metricsListeners.set(id, listener)
+      ipcRenderer.on(IpcChannel.metricsSample, listener)
+      return id
+    },
+    offSample: (id: number): void => {
+      const listener = metricsListeners.get(id)
+      if (!listener) {
+        return
+      }
+      metricsListeners.delete(id)
+      ipcRenderer.removeListener(IpcChannel.metricsSample, listener)
+    }
+  },
+  git: {
+    status: () => invoke(IpcChannel.gitStatus, {}),
+    diff: (payload: unknown) => invoke(IpcChannel.gitDiff, payload),
+    log: (payload: unknown) => invoke(IpcChannel.gitLog, payload),
+    init: () => invoke(IpcChannel.gitInit, {}),
+    stage: (payload: unknown) => invoke(IpcChannel.gitStage, payload),
+    unstage: (payload: unknown) => invoke(IpcChannel.gitUnstage, payload),
+    commit: (payload: unknown) => invoke(IpcChannel.gitCommit, payload),
+    createBranch: (payload: unknown) => invoke(IpcChannel.gitCreateBranch, payload),
+    switch: (payload: unknown) => invoke(IpcChannel.gitSwitch, payload),
+    addRemote: (payload: unknown) => invoke(IpcChannel.gitAddRemote, payload),
+    push: (payload: unknown) => invoke(IpcChannel.gitPush, payload),
+    pull: (payload: unknown) => invoke(IpcChannel.gitPull, payload),
+    identity: () => invoke(IpcChannel.gitIdentity, {}),
+    setIdentity: (payload: unknown) => invoke(IpcChannel.gitSetIdentity, payload),
+    ignorePreview: (payload: unknown) => invoke(IpcChannel.gitIgnorePreview, payload),
+    ignoreWrite: (payload: unknown) => invoke(IpcChannel.gitIgnoreWrite, payload),
+    scanCommit: (payload: unknown) => invoke(IpcChannel.gitScanCommit, payload),
+    exportPreview: (payload: unknown) => invoke(IpcChannel.gitExportPreview, payload),
+    export: (payload: unknown) => invoke(IpcChannel.gitExport, payload),
+    publishProbe: () => invoke(IpcChannel.gitPublishProbe, {})
+  },
+  auth: {
+    status: () => invoke(IpcChannel.authStatus, {}),
+    register: (payload: unknown) => invoke(IpcChannel.authRegister, payload),
+    login: (payload: unknown) => invoke(IpcChannel.authLogin, payload),
+    verify: (payload: unknown) => invoke(IpcChannel.authVerify, payload),
+    resend: (payload: unknown) => invoke(IpcChannel.authResend, payload),
+    forgot: (payload: unknown) => invoke(IpcChannel.authForgot, payload),
+    reset: (payload: unknown) => invoke(IpcChannel.authReset, payload),
+    logout: () => invoke(IpcChannel.authLogout, {}),
+    logoutAll: () => invoke(IpcChannel.authLogoutAll, {}),
+    me: () => invoke(IpcChannel.authMe, {}),
+    devices: () => invoke(IpcChannel.authDevices, {}),
+    retry: () => invoke(IpcChannel.authRetry, {})
   }
 }
 
