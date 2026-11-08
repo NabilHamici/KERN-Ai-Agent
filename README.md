@@ -238,12 +238,20 @@ pnpm install
 ```
 
 Store your BharatCode API key in **Settings** inside the app (encrypted via Electron `safeStorage`).  
-Do not commit keys. Environment placeholders if you script around the desktop app:
+Do not commit keys.
+
+**Cloud API:** cloned builds use the production backend by default:
+
+`https://backup.shedrive-app.com`
+
+Only set `KERN_API_URL` if you intentionally run a local/self-hosted API:
 
 ```bash
+# Optional — local server override (default is production)
+# KERN_API_URL=http://127.0.0.1:4000
+
 # Example only — never commit real values
 # BHARATCODE_API_KEY=your_bharatcode_api_key_here
-# KERN_API_URL=https://your-kern-api.example
 ```
 
 ### Run

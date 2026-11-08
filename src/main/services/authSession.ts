@@ -2,6 +2,7 @@ import { app, safeStorage } from 'electron'
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { DEFAULT_KERN_API_URL } from '../../shared/api.ts'
 import type { AuthPublicUser, AuthSessionState } from '../../shared/auth.ts'
 
 type StoredSession = {
@@ -27,7 +28,7 @@ export class AuthSessionService {
   private readonly metaPath: string
 
   constructor(userData: string) {
-    this.apiBase = (process.env.KERN_API_URL ?? 'http://127.0.0.1:4000').replace(/\/$/, '')
+    this.apiBase = (process.env.KERN_API_URL ?? DEFAULT_KERN_API_URL).replace(/\/$/, '')
     this.vaultPath = path.join(userData, 'auth-session.bin')
     this.metaPath = path.join(userData, 'auth-meta.json')
     this.installationId = this.loadOrCreateInstallationId(userData)
